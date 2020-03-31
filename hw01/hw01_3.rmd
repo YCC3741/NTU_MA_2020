@@ -1,0 +1,118 @@
+```{r}
+library(rethinking)
+library(rstan)
+library(tidyverse)
+```
+
+```{r}
+birth1 = c(
+  1,0,0,0,1,1,0,1,0,1,0,0,1,1,0,1,1,0,0,0,1,0,0,0,1,
+  0,0,0,0,1,1,1,0,1,0,1,1,1,0,1,0,1,1,0,1,0,0,1,1,0, 
+  1,0,0,0,0,0,0,0,1,1,0,1,0,0,1,0,0,0,1,0,0,1,1,1,1, 
+  0,1,0,1,1,1,1,1,0,0,1,0,1,1,0,1,0,1,1,1,0,1,1,1,1
+)
+birth2 = c(
+  0,1,0,1,0,1,1,1,0,0,1,1,1,1,1,0,0,1,1,1,0,0,1,1,1, 
+  0,1,1,1,0,1,1,1,0,1,0,0,1,1,1,1,0,0,1,0,1,1,1,1,1, 
+  1,1,1,1,1,1,1,1,1,1,1,0,1,1,0,1,1,0,1,1,1,0,0,0,0, 
+  0,0,1,0,0,0,1,1,0,0,1,0,0,1,1,0,0,0,1,1,1,0,0,0,0
+)
+```
+
+```{r}
+num_all_train_data =  length(birth1) + length(birth2)
+num_boys = sum(birth1) + sum(birth2)
+num_girls = num_all_train_data - num_boys
+
+boy_num_grid = seq(from=0, to=1, length.out=500)
+
+data = tibble( boy_p = boy_num_grid, prior = 1) %>% 
+  mutate(likelihood = dbinom(
+    num_boys, size=num_all_train_data, prob=boy_p)) %>% 
+  mutate(posterior_unstd = prior * likelihood) %>%
+  mutate(posterior_std = prior * likelihood /sum(posterior_unstd))
+
+best_parameters = data[which.max(data$posterior_std) ,]
+
+q3_answer_a_pic = data %>% 
+  ggplot()+
+  geom_line(aes(x=boy_p, y=posterior_std))+
+  geom_point(
+    aes(x=best_parameters$boy_p, y=best_parameters$posterior_std,
+        color = "best parameters")
+  )+
+  geom_vline(
+    aes( xintercept=best_parameters$boy_p, color = "best parameters"),
+    alpha=0.3
+  )
+
+q3_answer_a = best_parameters$boy_p
+
+
+q3_answer_a_pic
+
+q3_answer_a
+```
+
+```{r}
+sampling = sample(
+  x=boy_num_grid, size=1e4, prob = data$posterior_std, replace = TRUE
+)
+
+HPDI_50 = HPDI(sampling, prob = 0.5)
+HPDI_89 = HPDI(sampling, prob = 0.89)
+HPDI_97 = HPDI(sampling, prob = 0.97)
+
+q3_answer_b = data.frame(
+  "HPDI_50" = HPDI_50,
+  "HPDI_89" = HPDI_89,
+  "HPDI_97" = HPDI_97,
+  row.names = c("lower-HPDI", "upper-HPDI")
+)
+
+q3_answer_b
+```
+
+```{r}
+binorm_pred = rbinom(n = 10000, size = num_all_train_data,
+                    prob = sampling)
+
+
+q3_answer_c_pic = ggplot()+
+  geom_density(aes(binorm_pred, color = "by_binormal_boy_num"))+
+  geom_vline(
+    aes(xintercept = num_boys, color = "actual")
+  )
+
+q3_answer_c_pic 
+
+```
+
+```{r}
+
+num_firstgirl_secondboy = 0
+num_birth1 = length(birth1)
+num_birth2 = length(birth2)
+
+for (i in 1:num_birth1) {
+  if( birth1[i] == 0 && birth2[i] == 1 ){
+    num_firstgirl_secondboy = num_firstgirl_secondboy + 1  
+  }
+}
+
+num_first_girl = num_birth1 - sum(birth1)
+
+simulation = rbinom(
+   n = 10000, size = num_first_girl, prob = sampling
+)
+
+q3_answer_d_pic = ggplot()+
+  geom_density(aes(simulation, color = "simulation"))+
+  geom_vline(
+    aes(xintercept=num_firstgirl_secondboy,
+        color = "observe"
+    )
+  )
+
+q3_answer_d_pic
+```

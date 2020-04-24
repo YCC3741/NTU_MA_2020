@@ -1,0 +1,347 @@
+---
+title: "MA_Hw_02"
+output: html_notebook
+---
+
+# Import libraries
+The following libraries is what I've used in my code
+```{r}
+library(plyr)
+library(rethinking)
+library(rstan)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+```
+
+# Read the data in 
+I split the train data into two parts, which are fold_train_x and unfold_train_x.  
+The fold_train_x contains the columns of categorical data that haven't been one-hot encoded.  
+The unfold_train_x contains those having been one-hot encoded.  
+```{r}
+all_train_data = read.csv(file = 'train.csv')
+test_data = read.csv(file = 'test.csv')
+
+train_y = all_train_data["y"]
+train_x = all_train_data[ , (names(all_train_data)!="y")]
+
+fold_train_x = train_x[2:9]
+unfold_train_x = train_x[10:length(train_x)]
+
+fold_test_data = test_data[2:9]
+unfold_test_data = test_data[10:length(test_data)]
+
+fold_all_data = rbind(fold_train_x, fold_test_data)
+unfold_all_data = rbind(unfold_train_x, unfold_test_data)
+```
+
+
+```{r}
+#unfold_and_y = cbind(unfold_train_x, train_y)
+#cor_table = round(cor(unfold_and_y, use = "complete.obs"), 4)[1:length(unfold_and_y)-1, length(unfold_and_y)]
+#cor_table = cor_table[!is.na(cor_table)]
+
+#important_table = cor_table[abs(cor_table)>0.1]
+#important_table
+```
+
+```{r}
+#important_col = names(important_table)
+
+#selected_unfold_all_data = unfold_all_data[important_col]
+#selected_unfold_all_data
+```
+
+
+```{r}
+
+df_to_plot = cbind(fold_train_x, train_y)
+
+pic1 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X0), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+pic2 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X1), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+
+grid.arrange(pic1, pic2, ncol=2)
+```
+
+```{r}
+pic1 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X2), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+pic2 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X3), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+grid.arrange(pic1, pic2, ncol=2)
+```
+
+```{r}
+pic1 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X4), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+pic2 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X5), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+grid.arrange(pic1, pic2, ncol=2)
+```
+
+```{r}
+pic1 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X6), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+pic2 = df_to_plot %>% 
+  ggplot(aes(x=reorder(factor(X8), y), y = y))+ 
+  stat_summary(fun = "mean", geom = "bar")
+
+grid.arrange(pic1, pic2, ncol=2)
+```
+
+```{r}
+drops = c("X3", "X4", "X6", "X8")
+selected_fold_all_data = fold_all_data[ , !(names(fold_all_data) %in% drops)]
+selected_fold_all_data
+```
+
+```{r}
+special_cate = c("u", "x", "h", "g", "f")
+
+levels(selected_fold_all_data$X5) = c(levels(selected_fold_all_data$X5), "new") 
+selected_fold_all_data$X5[! selected_fold_all_data$X5 %in% special_cate ] = "new"
+
+selected_fold_all_data = droplevels(selected_fold_all_data) 
+
+selected_fold_all_data
+```
+
+
+
+
+```{r}
+dummies <- dummyVars(~ ., data = selected_fold_all_data)
+head(dummies)
+onehot_fold_all_data <- data.frame(predict(dummies, newdata = selected_fold_all_data))
+onehot_fold_all_data
+```
+
+
+```{r}
+processed_x_tuning = cbind(onehot_fold_all_data[1:300,], unfold_all_data[1:300,])
+processed_x_train = cbind(onehot_fold_all_data[301:3209,], unfold_all_data[301:3209,])
+#processed_x_train = cbind(onehot_fold_all_data[1:3209,], selected_unfold_all_data[1:3209,])
+processed_x_test = cbind(onehot_fold_all_data[3210:4209,], unfold_all_data[3210:4209,])
+
+nzv = nearZeroVar(rbind(processed_x_tuning, processed_x_train)) # this function is in the caret package
+#nzv
+processed_x_tuning = processed_x_tuning[, -nzv]
+processed_x_train = processed_x_train[, -nzv]
+processed_x_test = processed_x_test[, -nzv]
+
+tuning_y = as.vector(t(train_y))[1:300]
+train_y = as.vector(t(train_y))[301:3209]
+#train_y = as.vector(t(train_y))
+```
+
+
+```{r}
+lr.model = "
+data{
+    int<lower=0> nrow;
+    int<lower=0> ncol;
+    matrix[nrow, ncol] train_x;
+    vector[nrow] train_y;
+    int<lower=0> nrow_test;
+    matrix[nrow_test, ncol] test;
+}
+parameters{
+    real alpha;
+    vector[ncol] beta;
+    real<lower=0> sigma;
+}
+model{
+    //alpha ~ normal(0,5);
+    
+    //for (i in 1:ncol){
+    //  if((i != 2) && (i != 122) && (i != 159) && (i != 192) && (i != 201) && (i != 217))
+    //    beta[i] ~ normal(0,10);
+    //}
+    
+    //beta[2] ~ normal(0,5);
+    //beta[122] ~ normal(0,5);
+    //beta[159] ~ normal(0,5);
+    //beta[192] ~ normal(0,5);
+    //beta[201] ~ normal(0,5);
+    //beta[217] ~ normal(0,5);
+    //sigma ~ normal(0, 15);
+    
+    alpha ~ normal(0,5);
+    beta ~ normal(0,8); 
+    sigma ~ normal(0,2);
+    
+    train_y ~ normal(train_x * beta + alpha, sigma);
+    // train_x lies afore beta, since int's a matrix multiplication
+}
+generated quantities{
+    real y_pred[nrow_test];
+    vector[nrow_test] mu;
+    
+    mu = alpha + test * beta;
+    y_pred = normal_rng(mu, sigma);
+}
+"
+
+```
+
+```{r}
+
+lr.data = list(
+              train_x = processed_x_train, 
+              train_y = train_y, 
+              
+              nrow = nrow(processed_x_train), 
+              ncol = ncol(processed_x_train),
+              
+              test = processed_x_tuning, 
+              nrow_test = nrow(processed_x_tuning))
+
+stan_m = stan_model(model_code = lr.model)
+lr.fit = optimizing(
+                stan_m,
+                data = lr.data,
+                hessian = TRUE)
+
+lr.para = lr.fit$par
+tuning_alpha = lr.para[1]
+tuning_beta_list = lr.para[2:146]
+tuning_sigma = lr.para[147]
+tuning_pred = lr.para[148:447]
+tuning_pred[1:9]
+```
+
+```{r}
+
+tuning = data.frame(tuning_pred, tuning_y)
+cor_table = round(cor(tuning, use = "complete.obs"), 5)
+cor_table
+```
+
+```{r}
+lr.model = "
+data{
+    int<lower=0> nrow;
+    int<lower=0> ncol;
+    matrix[nrow, ncol] train_x;
+    vector[nrow] train_y;
+    int<lower=0> nrow_test;
+    matrix[nrow_test, ncol] test;
+}
+parameters{
+    real alpha;
+    vector[ncol] beta;
+    real<lower=0> sigma;
+}
+model{
+    //alpha ~ normal(0,5);
+    
+    //for (i in 1:ncol){
+    //  if((i != 2) && (i != 122) && (i != 159) && (i != 192) && (i != 201) && (i != 217))
+    //    beta[i] ~ normal(0,10);
+    //}
+    
+    //beta[2] ~ normal(0,5);
+    //beta[122] ~ normal(0,5);
+    //beta[159] ~ normal(0,5);
+    //beta[192] ~ normal(0,5);
+    //beta[201] ~ normal(0,5);
+    //beta[217] ~ normal(0,5);
+    //sigma ~ normal(0, 15);
+    
+    alpha ~ normal(0,5);
+    beta ~ normal(0,8); 
+    sigma ~ normal(0,2);
+    
+    train_y ~ normal(train_x * beta + alpha, sigma);
+    // train_x lies afore beta, since int's a matrix multiplication
+}
+generated quantities{
+    real y_pred[nrow_test];
+    vector[nrow_test] mu;
+    
+    mu = alpha + test * beta;
+    y_pred = normal_rng(mu, sigma);
+}
+"
+```
+
+
+```{r}
+
+lr.data = list(
+              train_x = processed_x_train, 
+              train_y = train_y, 
+              
+              nrow = nrow(processed_x_train), 
+              ncol = ncol(processed_x_train),
+              
+              test = processed_x_test, 
+              nrow_test = nrow(processed_x_test))
+
+stan_m = stan_model(model_code = lr.model)
+lr.fit = optimizing(
+                stan_m,
+                data = lr.data,
+                hessian = TRUE)
+
+#lr.fit = stan(
+#      model_code = lr.model, 
+#      data = lr.data, 
+#      iter=2500, 
+#      warmup=1250, 
+#      chains=2, 
+#      cores=2)
+```
+
+
+```{r}
+lr.para = lr.fit$par
+beta_list = lr.para[2:146]
+ans_pred = lr.para[148:1147]
+```
+
+```{r}
+#beta_list
+#ans_pred
+```
+
+
+```{r}
+#list_of_draws <- rstan::extract(lr.fit)
+#print(names(list_of_draws))
+```
+
+
+```{r}
+ans_pred = data.frame(ans_pred)
+colnames(ans_pred) = c("y")
+rownames(ans_pred) = c()
+ans_pred
+```
+
+
+
+```{r}
+sub_data = read.csv(file = 'test.csv')[1]
+sub_data = cbind(sub_data, ans_pred)
+sub_data
+write.csv(sub_data,"test_sub.csv", row.names = FALSE)
+```
+

@@ -84,7 +84,7 @@ for(i in 1:nrow(train_process["time_stamp"])){
   newtime = c(newtime, time)
 } 
 
-newtime = as.numeric(newtime)
+newtime = as.numeric(newtime)*100
 newtime = as.data.frame(newtime)
 colnames(newtime) = "time_stamp"
 
@@ -95,7 +95,7 @@ newtime = c()
 
 for(i in 1:nrow(test_x["time_stamp"])){
   time =  gsub("[/: ]", "" , test_x[i,"time_stamp"], perl=TRUE)
-  time = substr(time, nchar(time)-5, nchar(time)-2)
+  time = substr(time, nchar(time)-7, nchar(time)-2)
   newtime = c(newtime, time)
 } 
 
@@ -144,7 +144,7 @@ colNames = names(df_to_draw)
 for(col in colNames){
   plot = df_to_draw %>% 
     ggplot(aes_string(x=col)) +
-    geom_histogram(bins = 50)
+    geom_histogram(bins = 100)
   
   print(plot)
 }
@@ -187,7 +187,7 @@ parameters{
 }
 model{
     alpha ~ normal(0,10);
-    beta ~ normal(0,5); 
+    beta ~ normal(0,2); 
     sigma ~ lognormal(0,2);
     
     train_y ~ normal(train_x * beta + alpha, sigma);

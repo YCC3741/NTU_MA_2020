@@ -4,6 +4,9 @@ output:
   html_notebook:
     toc: yes
     toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
 ---
   
 # Import libraries
@@ -23,6 +26,8 @@ suppressMessages(library(MLmetrics))
 ```
 
 # Read the data
+
+Read the data and split them for the following processing
 
 ```{r}
 train_data = read.csv(file = 'train.csv')
@@ -46,6 +51,8 @@ dim(train_y)
 
 ### "Y" Distridution
 
+Draw the distribution of Y, so I can know how do them distribute
+
 ```{r}
 train_process = cbind(train_x, train_y)
 
@@ -61,12 +68,16 @@ ggplot()+
 
 ### Drop Extreme Ys
 
+Throw the extreme y (outliner), so the prediction would not be affected by them
+
 ```{r}
 train_process = train_process[-which(train_process$Stage1.Output.Measurement0.U.Actual<10),]
 train_process = train_process[-which(train_process$Stage1.Output.Measurement0.U.Actual>15),]
 ```
 
 ### Process Time Data
+
+Look at the time_stamp in train and test data
 
 ```{r}
 train_process["time_stamp"]
@@ -136,6 +147,12 @@ test_x
 
 ### Collinearity
 
+It is very important to avoid collinearity, because it would cause bad performance.
+
+#### Draw all columns
+
+Draw all the columns, and I find that there might be multicollinearity
+
 ```{r}
 
 df_to_draw = train_process[2:(length(train_process)-1)]
@@ -144,11 +161,15 @@ colNames = names(df_to_draw)
 for(col in colNames){
   plot = df_to_draw %>% 
     ggplot(aes_string(x=col)) +
-    geom_histogram(bins = 100)
+    geom_histogram(bins = 80)
   
   print(plot)
 }
 ```
+
+#### Tackle collinear column
+
+I find out the collinear columns, and drop them.
 
 ```{r}
 linecomb = findLinearCombos(train_process)
@@ -160,12 +181,14 @@ train_process = train_process[-linecomb$remove]
 test_x = test_x[-linecomb$remove]
 ```
 
+To check again whether there's still collinearity
+
 ```{r}
 findLinearCombos(train_process)
 ```
 
 
-# Model 1
+# Model_1 Original
 
 ### 0. The stan model
 I use matrix to save my train_x, instead of vector which we seen in the tutorial, because there's too many dimension of feature.
@@ -344,7 +367,7 @@ dim(pca_x_train)
 dim(pca_x_test)
 ```
 
-### 2. The Tuning Part
+### 3. The Tuning Part
 I set tuning part, so that I can know how to adjust my hyper-parameters.  
 Also, to be more efficient, I use "optimizing", which is a function in stan, to accelerate the model.
 
@@ -366,7 +389,7 @@ lr.fit = optimizing( # optimizing function to accelerate the model
                 hessian = TRUE)
 ```
 
-### 3. peek on tuning outcome
+### 4. peek on tuning outcome
 I check the prediction of tuning data, and use correlation function to see how well the model does.
 
 ```{r}
@@ -381,7 +404,7 @@ tuning_pred[1:9]
 print(rmse(actual=tuning_y, predicted=tuning_pred))
 ```
 
-### 4. Start prediction 
+### 5. Start prediction 
 
 ```{r}
 lr.data = list(
@@ -401,7 +424,7 @@ lr.fit = optimizing(
                 hessian = TRUE)
 ```
 
-### 5. Give it a look
+### 6. Give it a look
 
 ```{r}
 lr.para = lr.fit$par
@@ -412,7 +435,7 @@ ans_pred[1:9]
 length(ans_pred)
 ```
 
-### 6. Output Part
+### 7. Output Part
 
 Make some adjustment to the outcome in order to export to csv 
 ```{r}
@@ -555,6 +578,8 @@ write.csv(sub_data,"test_sub_model_3_AnotherTuning.csv", row.names = FALSE)
 
 
 # Model_4 All Data
+
+Because, known by tuning data, the performance in model 2 and 3 are not better, so at the end I concate the tuning and train data in model one in the last model.
 
 ### 1. Combine all train data
 ```{r}

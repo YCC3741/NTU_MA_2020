@@ -1,0 +1,63 @@
+---
+title: "MA_Hw_04_02"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+# Import library
+
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+```
+
+# Assigned Part
+required
+
+```{r}
+lr.model="
+data{
+    int <lower=1> N;
+}
+parameters{
+    real a;
+    real b;
+}
+model{
+    a ~ normal(0,1);
+    b ~ cauchy(0,1);
+}
+"
+```
+
+```{r}
+lr.fit= stan(
+            model_code = lr.model,
+            data = list(N=1),
+            chain = 2,
+            cores = 2,
+            iter = 2000)
+lr.post = as.data.frame(lr.fit)
+```
+
+# Conclusion
+We sampling two distribution, normal distribution and Cauchy distribution.  
+With the summary and the following pictures, you can see that normal distribution and Cauchy distribuion are a little similar to each other. However, you should note that normal distribution are more centerlised, and also Cauchy distribution's tails relatively decay much more slowly.
+
+```{r}
+summary(lr.post)
+
+q2_ab = ggplot()+
+  geom_histogram(aes(lr.post$a, color = "normal"), bins = 1000, alpha=1)+
+  geom_histogram(aes(lr.post$b, color = "Cauchy"), bins = 1000, alpha=0.01)
+
+q2_ab
+```
+

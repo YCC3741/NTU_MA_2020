@@ -1,0 +1,201 @@
+---
+title: "MA_Hw_04_03"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(tidyverse))
+suppressMessages(library(rstan))
+suppressMessages(library(rethinking))
+suppressMessages(library(gridExtra))
+suppressMessages(library(MASS))
+```
+
+## Import Data
+```{r}
+data("eagles")
+eagles
+```
+## Data-processing
+```{r}
+eagles$P <- ifelse(eagles$P == "L", 1,0) # Priate 1:Large, 0:Small
+eagles$A <- ifelse(eagles$A == "A", 1,0) # Eagle 1:Adult, 0:Immature
+eagles$V <- ifelse(eagles$V == "L", 1,0) # Priate 1:Large, 0:Small
+eagles
+```
+
+## Part A
+### model
+```{r}
+q3_a_m1 = "
+data{
+  int N;
+  int y[N];
+  int n[N];
+  int P[N]; //big pirate
+  int A[N]; //big eagles
+  int V[N]; //adult priate
+}
+
+parameters{
+  real alpha;
+  real beta_p;
+  real beta_v;
+  real beta_a;
+}
+
+transformed parameters{
+  real p[N];
+  for(i in 1:N){
+    p[i] = inv_logit(alpha + beta_p*P[i] + beta_v*V[i] + beta_a*A[i]);
+  }
+}
+
+model{
+  y ~ binomial(n, p);
+  alpha ~ normal(0,10);
+  beta_p ~ normal(0,5);
+  beta_v ~ normal(0,5);
+  beta_a ~ normal(0,5);
+}
+
+generated quantities{
+  vector[N] log_lik;
+  int pred_y[N];
+  real pred_p[N];
+  
+  for(i in 1:N){
+    pred_y[i] = binomial_rng(n[i], p[i]);
+    log_lik[i] = binomial_lpmf(pred_y[i] | n[i], p[i]);
+    pred_p[i] = inv_logit(alpha + beta_p*P[i] + beta_v*V[i] + beta_a*A[i]);
+  }
+}
+"
+
+q3_a_data = list(
+                N = nrow(eagles),
+                y = eagles$y,
+                n = eagles$n,
+                P = eagles$P,
+                A = eagles$A,
+                V = eagles$V)
+
+q3_a_fit = stan(
+              model_code = q3_a_m1,
+              data = q3_a_data,
+              iter = 5000,
+              chains = 2)
+        
+```
+
+
+## Part B
+
+### Analysis
+(1) The predicted probability of success, which means the probability of successfully catch the pirate, and its 89% interval contains the highest 89% posterior density of probability of success in the interval, which can be regarded as the most possible interval the predicted probability of success would be. We can also consider it to be that if we do 100 times sampling, we would get the value of probability of success bounded in that interval 89 times.
+(2) Just like above, the predicted success count and its 89% interval. We can also consider it to be that if we do 100 times sampling, we would get the value of success count bounded in that interval 89 times.
+
+(3) One tells the probability of success, and another tells the amount
+
+```{r}
+q2_b_result1 = as.data.frame(q3_a_fit)
+
+rows_pred_p = q2_b_result1 %>% dplyr::select(contains("pred_p"))
+rows_pred_y = q2_b_result1 %>% dplyr::select(contains("pred_y"))
+
+plot( precis( as.data.frame(rows_pred_p), prob=0.89, depth=2))
+plot( precis( as.data.frame(rows_pred_y), prob=0.89, depth=2))
+
+```
+
+
+## Part C
+### Add Interaction
+Adding Interaction of P and V
+```{r}
+eagles_interaction = eagles %>% mutate(PV = P*V)
+eagles_interaction
+```
+
+### Model
+This is the model with interaction of P and V
+```{r}
+q3_c_m1 = "
+data{
+  int N;
+  int y[N];
+  int n[N];
+  int P[N]; //big pirate
+  int A[N]; //big eagles
+  int V[N]; //adult priate
+  int PV[N];
+}
+
+parameters{
+  real alpha;
+  real beta_p;
+  real beta_v;
+  real beta_a;
+  real beta_pv;
+}
+
+transformed parameters{
+  real p[N];
+  for(i in 1:N){
+    p[i] = inv_logit(alpha + beta_p*P[i] + beta_v*V[i] + beta_a*A[i] + beta_pv*PV[i]);
+  }
+}
+
+model{
+  y ~ binomial(n, p);
+  alpha ~ normal(0,10);
+  beta_p ~ normal(0,5);
+  beta_v ~ normal(0,5);
+  beta_a ~ normal(0,5);
+  beta_pv ~ normal(0,5);
+}
+
+generated quantities{
+  vector[N] log_lik;
+  int pred_y[N];
+  real pred_p[N];
+  
+  for(i in 1:N){
+    pred_y[i] = binomial_rng(n[i], p[i]);
+    log_lik[i] = binomial_lpmf(pred_y[i] | n[i], p[i]);
+    pred_p[i] = alpha + beta_p*P[i] + beta_v*V[i] + beta_a*A[i] + beta_pv*PV[i];
+  }
+}
+"
+
+q3_c_data = list(
+                N = nrow(eagles_interaction),
+                y = eagles_interaction$y,
+                n = eagles_interaction$n,
+                P = eagles_interaction$P,
+                A = eagles_interaction$A,
+                V = eagles_interaction$V,
+                PV = eagles_interaction$PV)
+
+q3_c_fit = stan(
+              model_code = q3_c_m1,
+              data = q3_c_data,
+              iter = 4000,
+              chains = 2)
+    
+```
+
+### WAIC
+Model with interaction fits better, as it has the lowest WAIC (slightly smaller than model without interaction), and the result, at the same time, tells us that adding interaction benefits model a bit to explain the data.
+
+```{r}
+compare(q3_a_fit, q3_c_fit)
+```
+

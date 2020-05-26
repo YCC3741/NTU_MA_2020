@@ -1,0 +1,438 @@
+---
+title: "MA_Hw_04_01"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+```
+
+## Data-processing
+### Read data
+```{r}
+data("rugged")
+rugged
+```
+
+### Full_df & Without_Sey_df
+Form two dataframe, one for all data, and another for data without Seychelles
+```{r}
+full_data <- rugged %>%
+  dplyr::select(country, rgdppc_2000, cont_africa, rugged) %>% 
+  mutate(AR = cont_africa*rugged)
+full_data <- full_data[complete.cases(full_data),] #complete.cases for selecting non-NA row
+data_without_sey <- full_data %>% filter(country != "Seychelles")
+data_without_sey
+```
+
+### Standardlization
+```{r}
+full_data = full_data %>% 
+  mutate(
+    log_gdp = log(rgdppc_2000)) %>% 
+  mutate(
+    log_gdp_std = log_gdp / mean(log_gdp),
+    rugged_std = rugged / max(rugged))
+
+data_without_sey = data_without_sey %>% 
+  mutate(
+    log_gdp = log(rgdppc_2000)) %>% 
+  mutate(
+    log_gdp_std = log_gdp / mean(log_gdp),
+    rugged_std = rugged / max(rugged))
+
+full_data
+data_without_sey
+```
+
+## Part A
+### Model
+```{r}
+q1_m1 <- "
+data{
+  int N;
+  vector[N] y;
+  vector[N] A;
+  vector[N] R;
+  vector[N] AR;
+}
+
+parameters{
+  real alpha;
+  real beta_a;
+  real beta_r;
+  real beta_ar;
+  real sigma;
+}
+
+model{
+  vector[N] mu = alpha + beta_a*A + beta_r*R +beta_ar*AR;
+  y ~ normal(mu, sigma);
+
+  alpha ~ normal(1, 0.1);
+  beta_a ~ normal(0, 0.3);
+  beta_r ~ normal(0, 0.3);
+  beta_ar ~ normal(0, 0.3);
+  sigma ~ exponential(1);
+}
+
+generated quantities{
+  vector[N] pred_mu;
+  real pred_y[N];
+  vector[N] log_lik;
+
+  pred_mu = alpha + beta_a*A + beta_r*R + beta_ar*AR;
+  pred_y = normal_rng(pred_mu, sigma);
+
+  for(i in 1:N){
+    log_lik[i] = normal_lpdf(y[i] | pred_mu[i], sigma);
+  }
+}
+"
+```
+
+```{r}
+q1_with_sey = list(N = nrow(full_data),
+                y = full_data$log_gdp_std,
+                A = full_data$cont_africa,
+                R = full_data$rugged_std,
+                AR = full_data$AR)
+
+q1_no_sey = list(N = nrow(data_without_sey),
+                y = data_without_sey$log_gdp_std,
+                A = data_without_sey$cont_africa,
+                R = data_without_sey$rugged_std,
+                AR = data_without_sey$AR)
+
+q1_sey_fit1 = stan(model_code = q1_m1,
+               data = q1_with_sey,
+               iter = 2000,
+               chains = 2)
+
+q1_no_sey_fit2 = stan(model_code = q1_m1,
+               data = q1_no_sey,
+               iter = 2000,
+               chains = 2)
+```
+### result
+$\beta_{AR}$ represents the effect of ruggedness depends upon continent, and both $\beta_{AR}$ in the two models(one fits to the full data, the other one fits to the data without country Seychelles.) have 89% HPDI that contain 0. Therefore, it seems there exist no statistically significant effect of ruggedness depending upon continent.  
+
+Increasing 1 unit of ruggedness in any african country, we expect 0.0442 unit increase in y, which is log(gdp)/mean(log_gdp). Likewise, increasing 1 unit of ruggedness in african country except Seychelles, we expect 0.0322 unit increase in y, which is log(gdp)/mean(log_gdp).
+```{r}
+q1_a_result1 = as.data.frame(q1_sey_fit1)
+q1_a_result2 = as.data.frame(q1_no_sey_fit2)
+
+beta_ar1 = data.frame(
+  mean = q1_a_result1 %>% dplyr::select(contains("beta_ar")) %>% apply(.,2,mean),
+  L_HPDI = q1_a_result1 %>% dplyr::select(contains("beta_ar")) %>% apply(., 2, HPDI) %>% .[1,],
+  R_HPDI = q1_a_result1 %>% dplyr::select(contains("beta_ar")) %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+beta_ar2 = data.frame(
+  mean = q1_a_result2 %>% dplyr::select(contains("beta_ar")) %>% apply(.,2,mean),
+  L_HPDI = q1_a_result2 %>% dplyr::select(contains("beta_ar")) %>% apply(., 2, HPDI) %>% .[1,],
+  R_HPDI = q1_a_result2 %>% dplyr::select(contains("beta_ar")) %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+print(beta_ar1)
+print(beta_ar2)
+```
+ 
+
+## Part B
+plot the predictions
+I consider that I get the same conclusion as the above Part A.
+```{r}
+pred_mu = q1_a_result1 %>% dplyr::select(contains("pred_mu"))
+pred_y = q1_a_result1 %>% dplyr::select(contains("pred_y"))
+
+result = data.frame(
+  pred_mu = pred_mu %>% apply(., 2, mean),
+  CI_lower = pred_mu %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y %>% apply(., 2, HPDI) %>% .[2,],
+  gdp = full_data$log_gdp_std,
+  rug = full_data$rugged_std,
+  africa = full_data$cont_africa
+)
+
+picture_b= result %>% 
+  ggplot(aes(rug, gdp, fill = ifelse(africa==1, "africa", "else"))) +
+  geom_point(shape=21, stroke=0) + # stroke defines the thickness of the border of the point
+  geom_line(aes(rug, pred_mu)) +
+  geom_ribbon(aes(x=rug, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  labs(fill="Continent")
+
+picture_b
+picture_b + facet_wrap(~africa)
+```
+
+## Part C
+### Model1
+```{r}
+q1_c_m1 <- "
+data{
+  int N;
+  vector[N] y;
+  vector[N] R;
+}
+
+parameters{
+  real alpha;
+  real beta_r;
+  real sigma;
+}
+
+model{
+  vector[N] mu = alpha + beta_r*R;
+  y ~ normal(mu, sigma);
+
+  alpha ~ normal(1, 0.1);
+  beta_r ~ normal(0, 0.3);
+  sigma ~ exponential(1);
+}
+
+generated quantities{
+  vector[N] pred_mu;
+  vector[N] log_lik;
+
+  pred_mu = alpha + beta_r*R;
+
+  for(i in 1:N){
+    log_lik[i] = normal_lpdf(y[i] | pred_mu[i], sigma);
+  }
+}
+"
+```
+
+```{r}
+q1_c_data1 = list(N = nrow(data_without_sey),
+                  y = log(data_without_sey$rgdppc_2000),
+                  R = data_without_sey$rugged)
+
+q1_c_fit1 = stan(model_code = q1_c_m1,
+                 data = q1_c_data1,
+                 iter = 4000,
+                 chains = 1)
+```
+
+
+### Model2
+```{r}
+
+q1_c_m2 <- "
+data{
+  int N;
+  vector[N] y;
+  vector[N] A;
+  vector[N] R;
+}
+
+parameters{
+  real alpha;
+  real beta_a;
+  real beta_r;
+  real sigma;
+}
+
+model{
+  vector[N] mu = alpha + beta_a*A + beta_r*R;
+  y ~ normal(mu, sigma);
+
+  alpha ~ normal(1, 0.1);
+  beta_a ~ normal(0, 0.3);
+  beta_r ~ normal(0, 0.3);
+  sigma ~ exponential(1);
+}
+
+generated quantities{
+  vector[N] pred_mu;
+  vector[N] log_lik;
+
+  pred_mu = alpha + beta_a*A + beta_r*R;
+
+  for(i in 1:N){
+    log_lik[i] = normal_lpdf(y[i] | pred_mu[i], sigma);
+  }
+}
+"
+```
+
+```{r}
+q1_c_data2 = list(N = nrow(data_without_sey),
+                  y = log(data_without_sey$rgdppc_2000),
+                  A = data_without_sey$cont_africa,
+                  R = data_without_sey$rugged)
+
+q1_c_fit2 = stan(model_code = q1_c_m2,
+                 data = q1_c_data2,
+                 iter = 4000,
+                 chains = 1)
+```
+
+
+### Model3
+```{r}
+
+q1_c_m3 ="
+data{
+  int N;
+  vector[N] y;
+  vector[N] A;
+  vector[N] R;
+  vector[N] AR;
+}
+
+parameters{
+  real alpha;
+  real beta_a;
+  real beta_r;
+  real beta_ar;
+  real sigma;
+}
+
+model{
+  vector[N] mu = alpha + beta_a*A + beta_r*R + beta_ar*AR;
+  y ~ normal(mu, sigma);
+
+  alpha ~ normal(1, 0.1);
+  beta_a ~ normal(0, 0.3);
+  beta_r ~ normal(0, 0.3);
+  beta_ar ~ normal(0, 0.3);
+  sigma ~ exponential(1);
+}
+
+generated quantities{
+  vector[N] pred_mu;
+  vector[N] log_lik;
+
+  pred_mu = alpha + beta_a*A + beta_r*R + beta_ar*AR;
+
+  for(i in 1:N){
+    log_lik[i] = normal_lpdf(y[i] | pred_mu[i], sigma);
+  }
+}
+"
+```
+
+```{r}
+q1_c_data3 = list(N = nrow(data_without_sey),
+                  y = log(data_without_sey$rgdppc_2000),
+                  A = data_without_sey$cont_africa,
+                  R = data_without_sey$rugged,
+                  AR = data_without_sey$AR)
+
+q1_c_fit3 = stan(model_code = q1_c_m3,
+                 data = q1_c_data3,
+                 iter = 4000,
+                 chains = 1)
+```
+
+### WAIC
+Model 2 fits the best, since it has the lowest WAIC (slightly smaller than model 3), and the result also tells us that adding interaction doesn't benefit model to explain the data.  
+```{r}
+compare(q1_c_fit1, q1_c_fit2, q1_c_fit3)
+```
+
+
+```{r}
+theta[4,1]
+```
+
+## Part D
+```{r}
+set.seed(1)
+x = q1_c_data3$y  ## simulated data 
+n.rep = 10000
+n.accept = 0
+
+A = q1_c_data3$A
+R = q1_c_data3$R
+AR = q1_c_data3$AR
+
+theta <- matrix(0, 5, n.rep) ## storage for sim. values 
+ll0 <- sum(dnorm(
+              x,
+              mean = theta[1,1] + theta[2,1]*A + theta[3,1]*R + theta[4,1]*AR,
+              sd=exp(theta[5,1]),
+              log=TRUE)) 
+
+for (i in 2:n.rep) { ## The MH loop
+  theta[,i] <- theta[,i-1] + rt(5,df=100)*0.05 ## proposal 
+  ll1 <- sum(dnorm(
+              x,
+              mean = theta[1,i] + theta[2,i]*A + theta[3,i]*R + theta[4,i]*AR,
+              sd=exp(theta[5,i]),
+              log=TRUE)) 
+  if (exp(ll1-ll0)>runif(1)) { ## MH accept/reject
+    ll0 = ll1
+    n.accept = n.accept+1 ## accept 
+  }
+  else theta[,i] = theta[,i-1] ## reject
+}
+
+```
+
+```{r}
+layout(matrix(1:8, 2, 4))
+
+plot(1:n.rep,
+     theta[1,], 
+     type="l",
+     xlab="iteration",
+     ylab="alpha")
+
+hist(theta[1,-(1:1000)],main="", xlab="alpha")
+
+plot(1:n.rep,
+     theta[2,],
+     type="l",
+     xlab="iteration",
+     ylab="beta_A")
+
+hist(theta[2,-(1:1000)],main="", xlab="beta_A")
+
+plot(1:n.rep,
+     theta[3,], 
+     type="l",
+     xlab="iteration",
+     ylab="beta_R")
+
+hist(theta[3,-(1:1000)],main="", xlab="beta_R")
+
+plot(1:n.rep,
+     theta[4,],
+     type="l",
+     xlab="iteration",
+     ylab="beta_AR")
+
+hist(theta[4,-(1:1000)],main="", xlab="beta_AR")
+
+```
+
+I drop the first 1000 sigma, because they are unstable
+
+```{r}
+layout(matrix(1:2, 1, 2))
+
+plot(1001:n.rep,
+     exp(theta[5,-(1:1000)]),
+     type="l",
+     xlab="iteration",
+     ylab=expression(sigma))
+
+hist(exp(theta[5,-(1:1000)]),main="", xlab=expression(sigma))
+
+```
+

@@ -1,0 +1,368 @@
+---
+title: "Tutorial ch11-2 script"
+author: "Ryan Huang"
+date: "10/26/2019"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    toc_float: true
+---
+
+```{r, results='hide'}
+library(rethinking)
+library(rstan)
+library(tidyverse)
+library(gridExtra)
+library(skimr) # for n_unique func
+library(DMwR) # for unscale func
+compare = rethinking::compare
+```
+
+# CH11 Mixture and Monster
+
+# Ordered categorical regression
+
+## Ordered outcome
+Sometimes we have outcome variables that is discrete but in which the values indicate different ordered levels. These ordered variables should be treated differently from discrete variables or continuous variables. 
+Our prediction of a new observation should be the **relative probabilities** of it in different levels (ex: 1-20%, 2-10%,  3-30%, 4-5%, 6-..., 7-...). 
+
+It's like a multinomial classification problem with the constraint that the categories have a certain direction. Our problem is how to ensure that the model maps to the outcome in the correct direction.
+
+
+The data we use here is from an experiment. People are asked how much permissible that action is taken in a trolley problem under different scenarios. We want to investigate how people's reaction change under 3 different setting: *action*, *intention* and *contact*.
+
+```{r}
+data("Trolley")
+d_Trolley = Trolley
+```
+
+Let's look at the overall distribution and cumulative distribution of the response.
+```{r}
+p11.1.1 = 
+  d_Trolley %>% 
+  ggplot() +
+  geom_histogram(aes(response), bins = 7, binwidth = .3) +
+  scale_x_continuous("Response", labels = c(1:7), breaks = c(1:7)) +
+  scale_y_continuous("Frequency")
+  
+p11.1.2 = 
+  d_Trolley %>% 
+  group_by(response) %>% 
+  summarise(p = n() / nrow(d_Trolley)) %>% 
+  ggplot() +
+  geom_line(aes(x=response, y=cumsum(p))) +
+  geom_point(aes(x=response, y=cumsum(p)), shape = 21) +
+  scale_x_continuous("Response", labels = c(1:7), breaks = c(1:7)) +
+  scale_y_continuous("Cumulative proportion")
+
+grid.arrange(p11.1.1, p11.1.2, nrow=1)
+```
+
+To ensure that the model maps to the outcome in the correct direction, we need a new **link function** to convert the count. The solution is to use a **cumulative link function**. The cumulative probability of a value is the probability of that value or any smaller value. In the context of ordered categories, the cumulative probability of 3 is the sum of the probabilities of 3, 2, and 1.
+
+We then apply the `logit` transformation on the cumulative proportion, which is called the **log-cumulative-odds** transformation.
+
+```{r}
+p11.1.3 = 
+  d_Trolley %>% 
+  group_by(response) %>% 
+  summarise(p = n() / nrow(d_Trolley)) %>% 
+  mutate(cum_logit = p %>% cumsum() %>% logit()) %>% 
+  ggplot() +
+  geom_line(aes(x=response, y=cum_logit)) +
+  geom_point(aes(x=response, y=cum_logit), shape = 21) +
+  scale_x_continuous("Response", labels = c(1:7), breaks = c(1:7)) +
+  scale_y_continuous("Cumulative proportion")
+p11.1.3
+```
+
+### Math Form
+These intercepts or cutpoints of the cumulative-log-odd values are the parameters we want to estimate in the ordered outcome problem. We will get the relative probabilities by  using the inverse link function to translate the intercepts(in logit scale) to cumulative probability and doing subtractions.
+
+$p_k = Pr(y_i = k) = Pr(y_i \leq k) - Pr(yi \leq k-1)$
+
+In math form:
+
+$p_k: p \ at \ k \\ q_k : cum\_p \ at \ k \\ \kappa_k: cum\_log\_odd \ intercepts \\ \phi_k: linear \ model \\ response \sim Categorical(\boldsymbol{p}) \\ p_1 = q_1 \\ pk = q_k - q_{k-1} \ for \ K > k > 1 \\ p_K = 1 - q_{K-1} \\ logit(q_k) = \kappa_k - \phi_k$
+
+```{r}
+p11.1.4 = 
+  d_Trolley %>% 
+  group_by(response) %>% 
+  summarise(p = n() / nrow(d_Trolley)) %>% 
+  mutate(p_lower = c(0, cumsum(p))[1:7],
+         p_upper = cumsum(p)) %>% 
+  ggplot() +
+  geom_line(aes(x=response, y=cumsum(p))) +
+  geom_point(aes(x=response, y=cumsum(p)), shape = 21) +
+  geom_segment(aes(x=response+.02, xend=response+.02, y=p_lower, yend=p_upper), color="blue") +
+  geom_segment(aes(x=response, xend=response, y=0, yend=p_upper)) +
+  scale_x_continuous("Response", labels = c(1:7), breaks = c(1:7)) +
+  scale_y_continuous("Cumulative proportion")
+p11.1.4
+```
+The blue lines are our goal, the relative probabilities of each outcome.
+
+### Stan Model
+Let's insert the 3 scenarios and their interactions into the model. To include predictor variables, we define the log-cumulative-odds of each response k as a sum of its intercept $\alpha_k$ and a typical linear model.
+
+Our 3 scenarios and their interactions:
+  * No action/interaction
+  * Action
+  * Contact
+  * Intention
+  * Action + Intention
+  * Contact + Intention
+
+There are 11 parameters to estimate in this model: 6 intercepts + 5 coefficients
+Then each cumulative logit becomes:
+
+$log \frac{Pr(y_i \le k)}{1-Pr(y_i \le k)} = \alpha_k - \phi_i \\ \phi_i = \beta_A A_i + \beta_C C_i + \beta_{I,i} I \\ \beta_{I,i} = \beta_I + \beta_{IA} A_i + \beta_{IC} C_i$
+
+where $\beta_I$ is just the interaction.
+
+Notice that we **subtract** the linear part from the intercept because a subtraction shifts the probability to higher value. So a positive $beta$ coefficient means a positive impact on the outcome probability value.
+
+#### Model code
+```{r}
+# Data for prediction
+A = 0:1
+C = 0:1
+I = 0:1
+scenario = expand.grid(A=0:1,C=0:1,I=0:1) %>% 
+  filter(!(A == 1 & C==1)) %>% 
+  mutate(case = rep(c(1,2,3), 2))
+```
+
+```{r, results='hide'}
+m11.3.1 = "
+data {
+	int N;
+	int R[N]; // response
+	
+	int A[N]; // action
+	int C[N]; // contact
+	int I[N]; // intention
+
+  int pred_A[6];
+  int pred_C[6];
+  int pred_I[6];
+}
+
+parameters {
+	real bA;
+	real bC;
+	real bI;
+
+	real bIC;
+	real bIA;
+
+	ordered[6] cutpoints;
+}
+
+transformed parameters {
+	real phi[N];
+	real BI[N];
+	
+	for (i in 1:N){
+		BI[i] = bI * I[i] + bIA * A[i] + bIC * C[i];
+		phi[i] = bA * A[i] + bC * C[i] + BI[i] * I[i];
+  }
+}
+
+model {
+  
+for (i in 1:N){
+    R[i] ~ ordered_logistic(phi[i], cutpoints);
+  }
+	
+	bA ~ normal(0,0.5);
+	bC ~ normal(0,0.5);
+	bI ~ normal(0,0.5);
+	bIA ~ normal(0,0.5);
+  bIC ~ normal(0,0.5);
+	
+	cutpoints ~ normal(0,1.5);
+}
+
+generated quantities {
+	real log_lik[N];
+  real pred_phi[6];
+  int pred_R[6];
+  
+
+	for (i in 1:N){
+		log_lik[i] = ordered_logistic_lpmf(R[i] | phi[i], cutpoints);
+	}
+
+  for (i in 1:6){
+    pred_phi[i] = bA * pred_A[i] + bC * pred_C[i] + (bI * pred_I[i] + bIA * pred_A[i] + bIC * pred_C[i]) * pred_I[i];
+    pred_R[i] = ordered_logistic_rng(pred_phi[i], cutpoints);
+  }
+}
+"
+dat11.3.1 <- list(
+    N = nrow(d_Trolley),
+    R = d_Trolley$response %>% as.integer(),
+    A = d_Trolley$action %>% as.integer(),
+    I = d_Trolley$intention %>% as.integer(),
+    C = d_Trolley$contact %>% as.integer(),
+    pred_A = scenario$A %>% as.integer(),
+    pred_C = scenario$C %>% as.integer(),
+    pred_I = scenario$I %>% as.integer())
+
+init11.3.1 <- function() {
+  list(cutpoints = c(-1.9, -1.2, -0.7, 0.2, 0.9, 1.8))
+} 
+
+fit11.3.1 = stan(model_code = m11.3.1, data = dat11.3.1, chains = 2, cores = 2, warmup = 1000, init = init11.3.1, iter = 2000)
+```
+
+```{r}
+print(fit11.3.1, pars = c("bA", "bC", "bI", "bIA", "bIC", "cutpoints"))
+```
+
+The coeffifients are all negatives, meaning that each of these scenarios reduce the rating.
+
+
+#### Posterior plot
+There is no perfect way plotting the log-cumulative-odds. One common way is to use the horizontal axis for a predictor variable and the vertical axis for cumulative probability.
+
+ref:https://stackoverflow.com/questions/34044725/r-split-histogram-according-to-factor-level
+
+```{r}
+pred_R = as.data.frame(fit11.3.1, pars="pred_R")
+reshape_pred = 
+  pred_R %>% 
+  gather() %>% 
+  mutate(
+    case = c(rep("A=0, C=0", 2000), rep("A=1, C=0", 2000), rep("A=0, C=1", 2000)) %>% rep(.,2),
+    intent = c(rep(0, 6000), rep(1, 6000))
+  )
+reshape_pred %>% 
+  ggplot() +
+  geom_histogram(aes(x=value, group=(intent), fill=factor(intent)), position = "dodge",binwidth=0.25) +
+  facet_wrap(~case) +
+  scale_x_continuous("Response", labels = c(1:7), breaks = c(1:7)) +
+  scale_y_continuous("Frequency")
+```
+
+
+## Ordered predictor
+The last part of this chapteris about treating ordered variables when they are predictors. We will use the `edu` variable in the same dataset as our example.
+
+First we need to code the 8 levels to the right order.
+```{r}
+# ref: https://stackoverflow.com/questions/3905038/replace-values-in-a-vector-based-on-another-vector
+d_Trolley$edu %>% levels
+edu_levels = c( 6 , 1 , 8 , 4 , 7 , 2 , 5 , 3 )
+d_Trolley$new_edu = edu_levels[d_Trolley$edu]
+```
+
+Now for the fun part. Each step up in the ordered value comes with its own incremental effect on the outcome. So with 8 levels, we need 7 parameters to record each of the incremental effect.
+
+To make it more convenient for interpretation, we define $\beta_E$ as the total effect of all 7 incremental effects and let $\delta_1 \sim \delta_7$ be fractions of it.
+
+This $\beta_E$ move also helps us define priors. If the prior expectation is that all of the levels have the same incremental effect, then we want all the $\delta_j$ to have the same prior. 
+
+### Dirichlet Distribution
+We use a Dirichlet distribution as the prior of $\delta_j$. It's the multinomial extention of the beta distribution. In the beta, these were the parameters $\alpha$ and $\beta$, the prior counts of success and failures, respectively. In the Dirichlet, there is a just a long vector $\alpha$ with pseudo-counts for each possibility. If we assign the same value to each, it is a uniform prior. The larger the $\alpha$ values, the the stronger prior that the probabilities are all the same.
+
+Beta(a, b): a=成功次數, b=失敗次數 (prior)
+資料中一次成功的observation, a就加1。
+如果beta(a, b) = beta(2, 2), 一次observation就會從1:1變成3:2 or 2:3
+如果beta(a, b) = beta(100, 100), 一次一次observation後還是差不多1:1, 影響不大，所以是比較強的prior
+dirichlet是一樣的邏輯，只是從(a,b)變長成(a1, a2, a3, a4....) a的各個值越大依樣代表prior越強
+
+Let's compare 100 samples from a weak Dirichlet prior a = {2,2,2,2,2} and a strong one a = {100, 100, 100, 100, 100}
+
+```{r}
+library(gtools)
+
+p1 = ggplot() + ggtitle("weak prior")
+p2 = ggplot() + ggtitle("strong prior")
+
+
+for (i in 1:100) {
+  p1 = p1 + 
+    geom_line(aes(x=c(1:7), y=rdirichlet(1, rep(2, 7))[1,]), alpha=.3) +
+    ylim(0,1)
+  p2 = p2 + 
+    geom_line(aes(x=c(1:7), y=rdirichlet(1, rep(1000, 7))[1,]), alpha=.3) +
+    ylim(0,1)
+  }
+
+grid.arrange(p1, p2, nrow=1)
+```
+
+### Stan model
+```{r, results='hide'}
+m11.3.2 = "
+data {
+	int N;
+
+	int R[N]; // response
+	
+	int A[N]; // action
+	int C[N]; // contact
+	int I[N]; // intention
+	int E[N]; // education
+	vector[7] alpha; // prior
+
+}
+parameters {
+	real bA;
+	real bC;
+	real bI;
+	real bE;
+	
+	simplex[7] delta;
+
+
+	ordered[6] cutpoints;
+}
+
+transformed parameters {
+	real phi[N];
+	vector[8] delta_j;
+
+	delta_j = append_row(0, delta);
+
+	for (i in 1:N){
+		phi[i] = bA * A[i] + bC * C[i] + bI * I[i] + bE * sum(delta_j[1:E[i]]);
+	}
+}
+model {
+	
+	for (i in 1:N){
+		R[i] ~ ordered_logistic(phi[i], cutpoints);
+	}
+	
+	bA ~ normal(0,0.5);
+	bC ~ normal(0,0.5);
+	bI ~ normal(0,0.5);
+	bE ~ normal(0,0.5);
+
+	delta ~ dirichlet(alpha);
+	cutpoints ~ normal(0,1.5);
+}
+"
+dat11.3.2 = list(
+  N = nrow(d_Trolley),
+  R = d_Trolley$response %>% as.integer(),
+  A = d_Trolley$action %>% as.integer(),
+  I = d_Trolley$intention %>% as.integer(),
+  C = d_Trolley$contact %>% as.integer(),
+  E = d_Trolley$new_edu %>% as.integer(),
+  alpha = rep(2,7)
+)
+
+fit11.3.2 = stan(model_code = m11.3.2, data = dat11.3.2, chains = 2, cores = 2, warmup = 1000, iter = 2000)
+```
+```{r}
+print(fit11.3.2, pars=c("bE", "bC", "bI", "bA", "delta"))
+```
+

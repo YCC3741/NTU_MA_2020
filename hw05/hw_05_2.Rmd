@@ -1,0 +1,279 @@
+---
+title: "MA_Hw_05_02"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+suppressMessages(library(skimr)) # for n_unique func
+```
+
+## Data-processing
+### Read data
+```{r}
+data("Hurricanes")
+Hurricanes
+```
+
+## PART A
+### Model
+#### Poisson Model
+For the parameters,  
+I set beta_f to be the coefficient of femininity.  
+And the difference between two models are that one doesn't considers the femininity of name, yet another does.
+```{r}
+q2_model_with_f = "
+data {
+	int N;
+	int death[N];
+  real femininity[N];
+}
+parameters {
+	real alpha;
+	real beta_f;
+}
+transformed parameters {
+	real lambda[N];
+	for (i in 1:N){
+		lambda[i] = exp(alpha + beta_f*femininity[i]);
+	}
+}
+model {
+	// model
+	death ~ poisson(lambda);
+
+	// prior
+	alpha ~ normal(0, 10);
+	beta_f ~ normal(0, 5);
+}
+generated quantities {
+	real log_lik[N];
+	real pred_lambda[N];
+	real pred_death[N];
+
+	for (i in 1:N){
+		log_lik[i] = poisson_lpmf(death[i] | lambda[i]);
+	}
+	for (i in 1:N){
+		pred_lambda[i] = exp(alpha + beta_f*femininity[i]);
+	}
+	for (i in 1:N){
+		pred_death[i] = poisson_rng(pred_lambda[i]);
+	}
+}
+"
+q2_model_no_f = "
+data {
+	int N;
+  int death[N];
+}
+parameters {
+	real alpha;
+}
+transformed parameters {
+	real lambda[N];
+	for (i in 1:N){
+		lambda[i] = exp(alpha);
+	}
+}
+model {
+	// model
+	death ~ poisson(lambda);
+
+	// prior
+	alpha ~ normal(0, 10);
+}
+generated quantities {
+	real log_lik[N];
+
+	for (i in 1:N){
+		log_lik[i] = poisson_lpmf(death[i] | lambda[i]);
+	}
+}
+"
+```
+
+```{r}
+q2_data_with_f = list(
+          N = nrow(Hurricanes),
+          femininity = Hurricanes$femininity,
+          death = Hurricanes$deaths
+)
+q2_data_no_f = list(
+          N = nrow(Hurricanes),
+          death = Hurricanes$deaths
+)
+```
+#### Fit
+```{r}
+q2_fit_with_f = stan(
+                  model_code = q2_model_with_f, 
+                  data = q2_data_with_f, 
+                  cores = 2, chains = 2, 
+                  warmup = 1500, iter = 3000)
+
+q2_fit_no_f = stan(
+                  model_code = q2_model_no_f, 
+                  data = q2_data_no_f, 
+                  cores = 2, chains = 2, 
+                  warmup = 1500, iter = 3000)
+```
+
+### Check the posteriors
+we can see that all the R hat of paras of both models are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q2_fit_with_f, pars = c("alpha", "beta_f"))
+print(q2_fit_no_f, pars = c("alpha"))
+```
+
+### Compare Two model
+we can see that the model with fimininity seems to be a little better.
+```{r}
+compare(q2_fit_with_f, q2_fit_no_f)
+```
+
+### Association
+
+We can see, via the picture, the association between femininity of name and deaths isn’t strong, though the deadlies hurricanes seems to be a bit more feminine in name.  
+  
+```{r}
+q2_post_with_f = as.data.frame(q2_fit_with_f, pars = "pred_death")
+
+q2_result_with_f = Hurricanes %>% 
+  mutate(
+    pred_mean_death = q2_post_with_f %>% apply(., 2, mean),
+    PI_lower = q2_post_with_f %>% apply(., 2, HPDI) %>% .[1,],
+    PI_upper = q2_post_with_f %>% apply(., 2, HPDI) %>% .[2,])
+
+q2_pic_with_f = q2_result_with_f %>% 
+  ggplot() +
+  geom_line(aes(femininity, pred_mean_death, color ="Pred")) +
+  geom_ribbon(aes(x = femininity, ymin=PI_lower, ymax=PI_upper, color ="Pred"), alpha = .3)+
+  geom_point(data = q2_result_with_f, aes(femininity, pred_mean_death, color ="Pred"), shape=21) +
+  geom_point(data = q2_result_with_f, aes(femininity, deaths, color ="True_y"), shape=18)
+  
+q2_pic_with_f
+```
+
+### Fit performance
+And We also can know, via the above picture and the folloing dataframe,  
+The Model fits the Strom which is closer to the mean of pred_death best : Dennis,  
+and it fits the Strom which is far higher than our CI worst : Camille.
+```{r}
+q2_result_with_f$dis_y_pred = abs(q2_result_with_f$pred_mean_death - q2_result_with_f$deaths)
+
+best = q2_result_with_f$name[q2_result_with_f$dis_y_pred == min(q2_result_with_f$dis_y_pred)]
+worst = q2_result_with_f$name[q2_result_with_f$dis_y_pred == max(q2_result_with_f$dis_y_pred)]
+print(paste0("The model fit best on ", best))
+print(paste0("The model fit Worst on ", worst))
+```
+
+## PART B
+### Model
+#### Gamma Poisson Model
+For the parameters,  
+I set beta_f to be the coefficient of femininity, and set phi for getting higher degree of freedom.
+```{r}
+q2_model_B = "
+data {
+	int N;
+	int death[N];
+  real femininity[N];
+}
+parameters {
+	real alpha;
+	real beta_f;
+  real phi;
+}
+transformed parameters {
+	real lambda[N];
+	for (i in 1:N){
+		lambda[i] = exp(alpha + beta_f*femininity[i]);
+	}
+}
+model {
+	// model
+	death ~ neg_binomial_2(lambda, phi);
+
+	// prior
+	alpha ~ normal(0, 10);
+	beta_f ~ normal(0, 5);
+	phi ~ cauchy(0, 2);
+	
+}
+generated quantities {
+	real log_lik[N];
+	real pred_lambda[N];
+	real pred_death[N];
+
+	for (i in 1:N){
+		log_lik[i] = neg_binomial_2_lpmf(death[i] | lambda[i], phi);
+		pred_lambda[i] = exp(alpha + beta_f*femininity[i]);
+		pred_death[i] = neg_binomial_2_rng(pred_lambda[i], phi);
+	}
+}
+
+"
+```
+
+```{r}
+q2_data_B = list(
+          N = nrow(Hurricanes),
+          femininity = Hurricanes$femininity,
+          death = Hurricanes$deaths
+)
+```
+
+#### Fit
+```{r}
+q2_fit_B = stan(
+                  model_code = q2_model_B, 
+                  data = q2_data_B, 
+                  cores = 2, chains = 2, 
+                  warmup = 1500, iter = 3000)
+```
+
+### Check the posteriors
+we can see that all the R hat of paras are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q2_fit_B, pars = c("alpha", "beta_f", "phi"))
+```
+
+### Association
+The reason the association between femininity and deaths diminished in strength may be:  
+The original model may omit some varible that accounts for the variance.  
+After we revise the poisson distribution model to the gamma poisson distribution model, the model would have more degree of freedom, and therefore be more similar to it real distribution, and then we can see the real association.  
+  
+To sum up, there may be no(or only very very weak) association, but because of the limitation of the poisson distribution, we are misled to believe there is association. By using gamma poisson distribution, we get the better result.
+```{r}
+q2_post_B = as.data.frame(q2_fit_B, pars = "pred_death")
+
+q2_result_B = Hurricanes %>% 
+  mutate(
+    pred_mean_death = q2_post_B %>% apply(., 2, mean),
+    PI_lower = q2_post_B %>% apply(., 2, HPDI) %>% .[1,],
+    PI_upper = q2_post_B %>% apply(., 2, HPDI) %>% .[2,])
+
+q2_pic_B = q2_result_B %>% 
+  ggplot() +
+  geom_line(aes(femininity, pred_mean_death, color ="Pred")) +
+  geom_ribbon(aes(x = femininity, ymin=PI_lower, ymax=PI_upper, color ="Pred"), alpha = .3)+
+  geom_point(data = q2_result_B, aes(femininity, pred_mean_death, color ="Pred"), shape=21) +
+  geom_point(data = q2_result_B, aes(femininity, deaths, color ="True_y"), shape=18)
+  
+q2_pic_B
+```
+

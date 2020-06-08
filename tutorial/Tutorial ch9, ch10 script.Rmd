@@ -1,0 +1,679 @@
+---
+title: "Tutorial CH9, CH10-1"
+author: "Ryan Huang"
+date: "8/22/2019"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    toc_float: true
+---
+
+```{r, results='hide'}
+library(rethinking)
+library(rstan)
+library(tidyverse)
+library(gridExtra)
+library(skimr) # for n_unique func
+library(DMwR) # for unscale func
+compare = rethinking::compare
+```
+
+# CH9: BIG ENTROPY AND THE GENERALIZED LINEAR MODEL
+
+GLMs need not use Gaussian likelihoods. Any likelihood function can be used, and linear models can be attached to any or all of the parameters that describe its shape.
+
+The distribution that can happen the most ways is also the distribution with the biggest information entropy. The distribution with the biggest entropy is the most conservative distribution that obeys its constraints.
+
+Conditional independence: the observations are independent after accounting for differences in predictors, through the model. What this assumption doesn’t cover is a situation in which an observed event directly causes the next observed event.
+
+## Different distribution
+$X \sim {\sf Binomial}(n, \pi)$
+
+$X \sim {\sf Poisson}(\lambda)$
+
+## Link function
+* logit function: from real numbers to [0, 1]
+
+$logit(p_i) = log \frac{p_{i}}{1-p_{i}}$
+
+* log function: from real numbers to positive numbers
+
+$log(\lambda_i) = \alpha + \beta x$
+
+**After adding the link function, every predictor essentially interacts with itself, because the impact of a change in a predictor depends upon the value of the predictor before the change.**
+
+# CH10: Counting and Classification
+
+CH11 in Rethinking Ver2.
+
+I use the model in the Ver2. textbook since it's easier to understand.
+
+
+$y \sim {\sf Binom}(n, p) \\ logit(p_i) = \alpha + \beta x$
+
+* Logistic regression: outcome = 1 or 0
+* Aggregated binomial regression: outcome is count of success
+
+
+## Logistics Regression
+
+$y \sim {\sf Binom}(1, p)$
+
+### Data
+7 chimpanzees under four different treatments:
+1. prosoc_left= 0 and condition= 0
+2. prosoc_left= 1 and condition= 0
+3. prosoc_left= 0 and condition= 1
+4. prosoc_left= 1 and condition= 1
+
+We would like to know how different chimpanzees will react under different treatments.
+```{r}
+data(chimpanzees)
+d_chimpanzees = chimpanzees
+d_chimpanzees$treatment = 1 + d_chimpanzees$prosoc_left + 2*d_chimpanzees$condition
+```
+### Model 1
+This is the base model. We only have one intercept term. The model is kind of estimating the average `p` of the binomial distribution.
+
+$L_i \sim Binomial(1,p_i) \\ logit(p_i) = \alpha \\ \alpha \sim normal(0,\omega)$
+$logit(p_i) = \alpha$
+$\alpha \sim normal(0,\omega)$
+
+#### Prior Comparison
+
+Since the GLM model is no longer liner, we can't set the prior using just our intuition.
+
+We should visuilize them to see if the priors are reasonable.
+```{r}
+n = 1000
+# omega = 10
+a1 = rnorm(n, 0, 10)
+
+# omega = 1.5
+a2 = rnorm(n, 0, 1.5)
+
+prior_comp = data.frame(
+  prior1 = inv_logit(a1),
+  prior2 = inv_logit(a2)
+)
+
+prior_comp %>% 
+  ggplot() +
+  geom_density(aes(prior1), color="black", adjust=.1) +
+  geom_density(aes(prior2), color="blue", adjust=.1) +
+  labs(x="Prior Prob.") +
+  annotate("text", x=0.5, y=4, label= "a ~ normal(0, 10)", color="black") + 
+  annotate("text", x=0.5, y=3, label= "a ~ normal(0, 1.5)", color="blue")
+```
+From the above experiment, we can tell that a *flat* prior such as normal(0, 10) may not be as flat as we expected after the logit transformation. So we have to be careful about our choice of prior in glm models.
+
+#### GLM Model
+When using the GLM models, it's very common that we have to do parameters transformation such as logit transformation. To avoid declaring the transformed parameters too many times in different code blocks, we can add the transformed parameters block in Stan. By doing so, we can use it in both model block and generated quantities block without declaring it again.
+```{r, results='hide'}
+m10.1.1 = "
+data {
+	int N;
+	int pulled_left[N];
+}
+parameters {
+	real alpha;
+}
+transformed parameters {
+	real p = inv_logit(alpha);
+}
+model {
+  // model
+	pulled_left ~ binomial(1, p);
+
+	// prior
+	alpha ~ normal(0, 1.5);
+}
+generated quantities {
+	vector[N] log_lik;
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p);
+	}
+}
+"
+dat10.1.1 = list(N = nrow(d_chimpanzees),
+               pulled_left = d_chimpanzees$pulled_left %>% as.integer)
+fit10.1.1 = stan(model_code = m10.1.1, data = dat10.1.1, cores = 2, chains = 2)
+```
+```{r}
+print(fit10.1.1, pars = c("alpha", "p"))
+inv_logit(0.32)
+```
+
+### Model 2
+In the second model, we add the **treatment effect** into the model using index coding.
+
+$L_i \sim Binomial(1,p_i)$
+$logit(p_i) = \beta_{[treatment]}$
+$\beta \sim normal(0,\omega)$
+
+
+#### Prior Comparison
+We should try different priors on beta as well. Since each beta will be compared with other betas, we care about the difference in final probability under different betas. A flat normal prior on beta implies that the difference in probability is more likely to be either 0 or 1. Usually we would like a regularized prior on beta which concentrated on low absolute differences. So the narrow normal prior on beta is better.
+```{r}
+n = 10000
+
+data.frame(iter = 1:n) %>% 
+  mutate(b1 = inv_logit(rnorm(n, 0, 10)) - inv_logit(rnorm(n, 0, 10)),
+         b2 = inv_logit(rnorm(n, 0, .5)) - inv_logit(rnorm(n, 0, .5))) %>% 
+  ggplot() +
+  geom_density(aes(abs(b1)), adj=.1, color="black") +
+  geom_density(aes(abs(b2)), adj=.1, color="blue") +
+  labs(x="prior diff between treatments") +
+  annotate("text", x=0.5, y=2, label= "b ~ normal(0, 10)", color="black") + 
+  annotate("text", x=0.5, y=1.5, label= "b ~ normal(0, 0.5)", color="blue")
+```
+#### GLM Model
+```{r, results='hide'}
+m10.1.2 = "
+data {
+	int N;
+	int pulled_left[N];
+	int L;
+	int treatment[N];
+
+}
+parameters {
+	real beta[L];
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(beta[treatment[i]]);
+	}
+}
+model {
+  // model
+	pulled_left ~ binomial(1, p);
+
+	// prior
+	beta ~ normal(0, .5);
+}
+generated quantities {
+	vector[N] log_lik;
+	int pred_left[N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+		pred_left[i] = binomial_rng(1, p[i]);
+	}
+}
+"
+dat10.1.2 = list(N = nrow(d_chimpanzees),
+               pulled_left = d_chimpanzees$pulled_left %>% as.integer,
+               treatment = d_chimpanzees$treatment %>% as.integer,
+               L = d_chimpanzees$treatment %>% unique() %>% length())
+fit10.1.2 = stan(model_code = m10.1.2, data = dat10.1.2, cores = 2, chains = 2)
+```
+```{r}
+print(fit10.1.2, pars = c("beta"))
+```
+
+### Model 3
+In the final model, we take the effect of different chimpanzees into consideration.
+
+We set `alpha` to be the length of number of different chimpanzees.
+
+$L_i \sim Binomial(1,p_i)$
+$logit(p_i) = \alpha[chimp] + \beta[treatment]$
+$\alpha[chimp] \sim normal(0,\omega)$
+$\beta[treatment] \sim normal(0,\omega)$
+#### GLM Model
+```{r, results='hide'}
+m10.1.3 = "
+data {
+	int N;
+	int pulled_left[N];
+	int L;
+	int treatment[N];
+	int A;
+	int actor[N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[L];
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[actor[i]] + beta[treatment[i]]);
+	}
+}
+model {
+
+	pulled_left ~ binomial(1, p);
+
+	// prior
+	alpha ~ normal(0, 1.5);
+	beta ~ normal(0, .5);
+}
+generated quantities {
+	vector[N] log_lik;
+	int pred_left[N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+		pred_left[i] = binomial_rng(1, p[i]);
+	}
+}
+"
+dat10.1.3 = list(N = nrow(d_chimpanzees),
+               pulled_left = d_chimpanzees$pulled_left %>% as.integer,
+               treatment = d_chimpanzees$treatment %>% as.integer,
+               L = d_chimpanzees$treatment %>% n_unique(),
+               actor = d_chimpanzees$actor,
+               A = d_chimpanzees$actor %>% n_unique())
+fit10.1.3 = stan(model_code = m10.1.3, data = dat10.1.3, cores = 2, chains = 2)
+```
+```{r}
+print(fit10.1.3, pars = c("alpha", "beta"))
+```
+### Posterior Prediction
+In the posterior prediction plot, we would like to compare the reaction of different chimpanzees under different treatments. 
+
+Before plotting the plot, we have to group our prediction by chimpanzees and treatments to convert the 0/1 output to proportion data.
+
+To make the plot more readible, I add some variables and annotations, which make the following code not so easy to understand.
+
+Add the `food_loc` variable to plot 2 lines for different food position.
+
+Add the `partner` variable to plot 2 colors for partner or not.
+```{r, fig.height=10, fig.width=10}
+pred_p = as.data.frame(fit10.1.3, pars="p")
+
+result10.1.3 = 
+  data.frame(
+    pred_mean = pred_p %>% apply(., 2, mean),
+    PI_lower  = pred_p %>% apply(., 2, HPDI) %>% .[1,],
+    PI_upper  = pred_p %>% apply(., 2, HPDI) %>% .[2,],
+    actor = paste("actor", d_chimpanzees$actor),
+    treatment = d_chimpanzees$treatment,
+    actual = d_chimpanzees$pulled_left
+  ) %>% 
+  group_by(actor, treatment) %>% # aggregate actor and treatment
+  summarise(pred_mean = mean(pred_mean),
+            PI_lower = mean(PI_lower),
+            PI_upper = mean(PI_upper),
+            actual = mean(actual)) %>% 
+  ungroup() %>% 
+  mutate(food_loc = ifelse(treatment %in% c(1,3), "R", "L"), # food on right in treat 1, 3
+         partner = ifelse(treatment %in% c(1,2), "N", "Y")) # no partner in treat 1, 2
+
+# This is only for adding the annotation on only one facet
+# https://stackoverflow.com/questions/11889625/annotating-text-on-individual-facet-in-ggplot2
+ann_text = data.frame(
+  treatment = c(1.1, 2, 3, 3.9),
+  y = c(.4, .6, .2, .4),
+  label = c("R/N", "L/N", "R/Y", "L/Y"),
+  actor = factor("actor 1",levels = result10.1.3$actor %>% unique()))
+
+# Prediction
+p3 = ggplot() +
+  # different lines for different food_loc
+  geom_line(data = result10.1.3 %>% filter(food_loc == "R"), 
+            aes(treatment, pred_mean), color="dodger blue") +
+  geom_line(data = result10.1.3 %>% filter(food_loc == "L"), 
+            aes(treatment, pred_mean), color="dodger blue") +
+  # different color for partner or not
+  geom_point(data = result10.1.3,
+             aes(treatment, pred_mean, fill=partner), shape=21) +
+  # prediction interval as before
+  geom_segment(data = result10.1.3,
+               aes(x=treatment, xend = treatment,
+                   y=PI_lower, yend=PI_upper), alpha=.5) +
+  geom_hline(yintercept = 0.5, linetype="dashed") +
+  # split by actor
+  facet_wrap(~actor, ncol=7) + 
+  # annotation
+  geom_text(data=ann_text, aes(treatment, y, label=label)) +
+  ylim(0, 1) +
+  labs(y="Pred",title="Posterior Prediction") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+# Observed
+p4 = ggplot() +
+  geom_line(data = result10.1.3 %>% filter(food_loc == "R"), 
+            aes(treatment, actual), color="gray") +
+  geom_line(data = result10.1.3 %>% filter(food_loc == "L"), 
+            aes(treatment, actual), color="gray") +
+  geom_point(data = result10.1.3,
+             aes(treatment, actual, fill=partner), shape=21) +
+  geom_hline(yintercept = 0.5, linetype="dashed") +
+  geom_text(data=ann_text, aes(treatment, y, label=label)) +
+  ylim(0, 1) +
+  facet_wrap(~actor, ncol=7) +
+  labs(y="actual", title="Observed Proportions") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+
+grid.arrange(p3, p4, nrow=2)
+
+```
+
+### Model Comparison
+```{r}
+compare(fit10.1.1, fit10.1.2, fit10.1.3)
+```
+### Conclusion
+The model expects almost no change when adding a partner. Most of the variation in predictions comes from the actor intercepts. Handedness seems to be the big story of this experiment.
+
+## Aggregated Binomial Regression
+
+$y \sim {\sf Binom}(n, p),\ n>1$
+
+
+### Example 1
+We can also aggregated the data by actor and treatment first. Each combination of actor and treatment has 18 experiments. Our model now is turned to this formed:
+
+$L_i \sim Binomial(18,p_i)$
+$logit(p_i) = \alpha[chimp] + \beta[treatment]$
+$\alpha[chimp] \sim normal(0,\omega)$
+$\beta[treatment] \sim normal(0,\omega)$
+
+The only difference is the n of the binomial distribution changed from 1 to 18.
+#### Data: Chimpanzees
+```{r}
+d2_chimpanzees = 
+  d_chimpanzees %>% 
+  group_by(actor, treatment) %>% 
+  summarise(pulled_left = sum(pulled_left)) %>% 
+  ungroup()
+```
+
+#### Model
+```{r, results='hide'}
+m10.2.1 = "
+data {
+	int N;
+	int pulled_left[N];
+	int L;
+	int treatment[N];
+	int A;
+	int actor[N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[L];
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[actor[i]] + beta[treatment[i]]);
+	}
+}
+model {
+
+	pulled_left ~ binomial(18, p);
+
+	// prior
+	alpha ~ normal(0, 1.5);
+	beta ~ normal(0, .5);
+}
+generated quantities {
+	vector[N] log_lik;
+	int pred_left[N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 18, p[i]);
+		pred_left[i] = binomial_rng(18, p[i]);
+	}
+}
+"
+dat10.2.1 = list(N = nrow(d2_chimpanzees),
+               pulled_left = d2_chimpanzees$pulled_left %>% as.integer,
+               treatment = d2_chimpanzees$treatment %>% as.integer,
+               L = d2_chimpanzees$treatment %>% unique() %>% length(),
+               actor = d2_chimpanzees$actor,
+               A = d2_chimpanzees$actor %>% unique() %>% length())
+fit10.2.1 = stan(model_code = m10.2.1, data = dat10.2.1, cores = 2, chains = 2)
+```
+```{r}
+print(fit10.2.1, pars = c("alpha", "beta"))
+print(fit10.1.3, pars = c("alpha", "beta"))
+```
+#### Compare with m10.1.3
+```{r}
+compare(fit10.1.3, fit10.2.1)
+```
+The aggregated model, m10.2.1, contains an extra factor in its log-probabilities, because of the way the data are organized. In the aggregated form, it counts all the ways you could see n successes in 18 trials. When we instead split the n success apart into 18 different 0/1 trials, like in a logistic regression(m10.1.3), there is no multiplicity term to compute. 
+
+### Example 2: Simpson’s paradox 
+
+In this case, applications to each department are different. So the n of the binomial distribution is also a variable.
+
+#### Data: UCB admit
+```{r}
+data(UCBadmit)
+d_UCBadmit = UCBadmit
+d_UCBadmit = d_UCBadmit %>% 
+  mutate(gender = applicant.gender,
+         admit_rate = admit / applications)
+```
+
+#### Model 1
+Only consider gender effect
+```{r, results='hide'}
+m10.2.2 = "
+data {
+	int N;
+	int admit[N];
+	int L;
+	int male[N];
+	int applications[N];
+
+}
+
+parameters {
+	real alpha[L];
+}
+
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[male[i]]);
+	}
+}
+
+model {
+
+	admit ~ binomial(applications, p);
+
+	// prior
+	alpha ~ normal(0, 1.5);
+}
+generated quantities {
+	vector[N] log_lik;
+	int pred_admit[N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(admit[i] | applications[i], p[i]);
+		pred_admit[i] = binomial_rng(applications[i], p[i]);
+	}
+}
+"
+dat10.2.2 = list(N = nrow(d_UCBadmit),
+                 applications = d_UCBadmit$applications,
+                 admit = d_UCBadmit$admit,
+                 male = d_UCBadmit$applicant.gender %>% as.integer(),
+                 L = d_UCBadmit$applicant.gender %>% n_unique())
+fit10.2.2 = stan(model_code = m10.2.2, data = dat10.2.2, cores = 2, chains = 2)
+```
+```{r}
+print(fit10.2.2, pars="alpha")
+```
+#### Model 2
+Take department into consideration
+```{r, results='hide'}
+m10.2.3 = "
+data {
+	int N;
+	int admit[N];
+	int L;
+	int male[N];
+	int applications[N];
+	int D;
+	int department[N];
+
+}
+
+parameters {
+	real alpha[L];
+	real delta[D];
+}
+
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[male[i]] + delta[department[i]]);
+	}
+}
+
+model {
+	// model
+	admit ~ binomial(applications, p);
+
+	// prior
+	alpha ~ normal(0, 1.5);
+}
+generated quantities {
+	vector[N] log_lik;
+	int pred_admit[N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(admit[i] | applications[i], p[i]);
+		pred_admit[i] = binomial_rng(applications[i], p[i]);
+	}
+}
+"
+dat10.2.3 = list(N = nrow(d_UCBadmit),
+                 applications = d_UCBadmit$applications,
+                 male = d_UCBadmit$applicant.gender %>% as.integer(),
+                 admit = d_UCBadmit$admit,
+                 department = d_UCBadmit$dept %>% as.integer(),
+                 D = d_UCBadmit$dept %>% n_unique(),
+                 L = d_UCBadmit$applicant.gender %>% n_unique())
+fit10.2.3 = stan(model_code = m10.2.3, data = dat10.2.3, cores = 2, chains = 2)
+```
+#### Interpretation
+* Model 1
+
+We may conclude that male applicants enjoy great advantages if we only look at the difference in the two alpha value in the model only considering gender effect. 
+
+```{r}
+print(fit10.2.2, pars = "alpha")
+```
+```{r}
+post10.2.2 = as.data.frame(fit10.2.2, pars = "alpha")
+post10.2.2 %>% 
+  ggplot() +
+  geom_density(aes(abs(inv_logit(`alpha[1]`)-inv_logit(`alpha[2]`)))) +
+  xlim(0, 0.3) +
+  labs(x="Dif. in pred proprotions")
+```
+
+However, something unusually appears when we plot the observed result condition on department. There are huge variations in different departments.
+
+```{r}
+post10.2.2_P = as.data.frame(fit10.2.2, pars="p")
+result10.2.2 = data.frame(
+  actual = d_UCBadmit$admit_rate,
+  gender = d_UCBadmit$gender,
+  gender2 = d_UCBadmit$gender %>% as.integer() - 1, 
+  dept   = d_UCBadmit$dept,
+  pred_p = post10.2.2_P %>% apply(., 2, mean),
+  PI_lower = post10.2.2_P %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = post10.2.2_P %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+p10.2.2 = result10.2.2 %>% 
+  ggplot() +
+  geom_point(aes(gender2, actual), shape=16) +
+  geom_line(aes(gender2, actual)) +
+  geom_point(aes(gender2, pred_p, fill=factor(gender)), shape=21) +
+  geom_segment(aes(x=gender2, xend=gender2, y=PI_lower, yend=PI_upper),
+               color="dodger blue", alpha = .6) +
+  facet_wrap(~dept, nrow=1) +
+  theme(axis.title.x =  element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ylim(0, 1) +
+  ggtitle("Prediction from Model10.2.2")
+```
+
+
+
+* Model 2
+
+Model 2 accounts for the departmental difference. When looking at the gender effect again, the difference is not obvious.
+```{r}
+print(fit10.2.3, pars = "alpha")
+```
+```{r}
+post10.2.3 = as.data.frame(fit10.2.3, pars = "alpha")
+colnames(post10.2.3)
+post10.2.3 %>% 
+  ggplot() +
+  geom_density(aes(abs(inv_logit(`alpha[1]`)-inv_logit(`alpha[2]`)))) +
+  xlim(0, 0.3) +
+  labs(x="Dif in pred proprotions")
+```
+
+On the other hand, the differences among different departments are huge.
+```{r}
+post10.2.3_D = as.data.frame(fit10.2.3, pars = "delta")
+colnames(post10.2.3_D)
+post10.2.3_D %>% 
+  ggplot() +
+  geom_density(aes(abs(inv_logit(`delta[1]`)-inv_logit(`delta[6]`)))) +
+  xlim(0, 1) +
+  labs(x="Dif in pred proprotions")
+```
+
+Posterir Prediction
+```{r}
+post10.2.3_P = as.data.frame(fit10.2.3, pars="p")
+result10.2.3 = data.frame(
+  actual = d_UCBadmit$admit_rate,
+  gender = d_UCBadmit$gender,
+  gender2 = d_UCBadmit$gender %>% as.integer() - 1, 
+  dept   = d_UCBadmit$dept,
+  pred_p = post10.2.3_P %>% apply(., 2, mean),
+  PI_lower = post10.2.3_P %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = post10.2.3_P %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+p10.2.3 = result10.2.3 %>% 
+  ggplot() +
+  geom_point(aes(gender2, actual), shape=21) +
+  geom_line(aes(gender2, actual)) +
+  geom_point(aes(gender2, pred_p, fill=factor(gender)), shape=21) +
+  geom_segment(aes(x=gender2, xend=gender2, y=PI_lower, yend=PI_upper),
+               color="dodger blue", alpha = .6) +
+  facet_wrap(~dept, nrow=1) +
+  theme(axis.title.x =  element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  ylim(0, 1) +
+  ggtitle("Prediction from Model10.2.3")
+
+```
+```{r, fig.height=6, fig.width=6}
+grid.arrange(p10.2.2, p10.2.3, nrow=2)
+compare(fit10.2.2, fit10.2.3)
+```
+
+Comparing the 2 predictions, we can tell that model10.2.3 have better predictions. Department effect is significant. So this is not an evidence of gender inequality of college admission.

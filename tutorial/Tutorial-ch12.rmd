@@ -1,0 +1,778 @@
+---
+title: "Tutorial CH12 Multilevel Models"
+author: "Ryan Huang"
+date: "11/16/2019"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    toc_float: true
+---
+
+```{r, results='hide'}
+library(rethinking)
+library(rstan)
+library(tidyverse)
+library(gridExtra)
+library(skimr) # for n_unique func
+library(DMwR) # for unscale func
+compare = rethinking::compare
+```
+
+**Ch13 Models without Amnesia in ver.2**
+
+In this chapter we will learn about mutilevel models. Simply speaking, these models are like assigning priors on priors instead of assigning fixed priors.
+
+Considering a data with many *clusters*, for example, the tadpoles in different *ponds*. If we want to estimate the survival rates of them in different ponds, we would set a *fixed* prior for the parameters(survival rates at different ponds) in previous chapters. In this setting, each of the parameters are estimated independendly with no information sharing between ponds. However, this is not consistent with the reality. In the real world, we gain more experience as we see more ponds. So our prior can be set *adatively*. In this chapter we will learn about mutilevel models, in which information will be shared across clusters.
+
+# One Cluster
+## Data
+```{r}
+data(reedfrogs)
+d_frogs = 
+  reedfrogs %>% 
+    mutate(tank = 1:nrow(reedfrogs))
+d_frogs
+```
+## Fixed prior model
+Let's do the *fixed* effect model from the previous chapter first.
+```{r, results='hide'}
+m12.1.1 = "
+data {
+	int N_tank;
+	int N[N_tank];
+	int S[N_tank];
+	int tank[N_tank];
+}
+
+parameters {
+	real a[N_tank];
+}
+
+transformed parameters {
+	real p[N_tank];
+	
+	for (i in 1:N_tank){
+		p[i] = inv_logit(a[i]);
+  }
+}
+
+model {
+	for (i in 1:N_tank){
+    	S[i] ~ binomial(N[i], p[i]);
+  	}
+	a ~ normal(0, 1.5);
+}
+
+"
+
+dat12.1.1 = list(
+  N_tank = d_frogs %>% nrow(),
+  N = d_frogs$density,
+  S = d_frogs$surv,
+  tank = d_frogs$tank
+)
+
+fit12.1.1 = stan(model_code = m12.1.1, data = dat12.1.1, iter = 2000, chains = 2, cores = 2)
+
+```
+
+
+
+## Adative prior (Multilevel) model
+```{r, results='hide'}
+m12.1.2 = "
+data {
+	int N_tank;
+	int N[N_tank];
+	int S[N_tank];
+	int tank[N_tank];
+}
+parameters {
+	real a_bar;
+	real<lower=0> a_sigma;
+	real a[N_tank];
+}
+transformed parameters {
+	real p[N_tank];
+	for (i in 1:N_tank) {
+		p[i] = inv_logit(a[i]);
+	}
+}
+model {
+	// adative prior
+	a ~ normal(a_bar, a_sigma);
+	a_bar ~ normal(0, 1.5);
+	a_sigma ~ exponential(1);
+
+	// model
+	for (i in 1:N_tank){
+		S[i] ~ binomial(N[i], p[i]);
+	}
+	
+}
+generated quantities {
+	real log_lik[N_tank];
+	for	(i in 1:N_tank){
+		log_lik[i] = binomial_lpmf(S[i] | N[i], p[i]);
+	}
+}
+"
+
+dat12.1.2 = dat12.1.1
+
+fit12.1.2 = stan(model_code = m12.1.2, data = dat12.1.2, cores = 2, iter = 2000, chains = 2)
+```
+
+## Model Comparison
+Let’s plot and compare the posterior means from models m12.1.1 and m12.1.2.
+
+* Horizontal axis: tank index, from 1 to 48
+
+* Vertical axis: proportion of survivors in a tank
+
+* Circles: raw proportions from observed data
+
+* Pink points: fixed prior model medians
+
+* Blue points: multilevel model medians
+
+```{r}
+post12.1.1 = as.data.frame(fit12.1.1, pars="p") %>% apply(., 2, median)
+post12.1.2 = as.data.frame(fit12.1.2, pars="p") %>% apply(., 2, median)
+d_frogs %>% 
+  mutate(
+    density_size = rep(c("small","medium","large"), each=16),
+    fixed_model = post12.1.1,
+    adative_model = post12.1.2
+         ) %>% 
+  ggplot() +
+  geom_point(aes(tank, propsurv), shape=1) +
+  geom_point(aes(tank, post12.1.1), shape=21, fill="pink", alpha=0.5) +
+  geom_point(aes(tank, post12.1.2), shape=21, fill="blue") +
+  geom_vline(xintercept = c(17, 33), alpha=0.5) +
+  geom_hline(yintercept = d_frogs$propsurv %>% mean, alpha=0.5, linetype="dashed") +
+  annotate(geom = "text", x=c(8,25,42), y=0.1, label=c("small tank", "medium tank", "large tank"))
+```
+
+We can observe 3 things from the above plot:
+
+1. The multilevel estimate is closer to the dashed line than the raw empirical estimate, which is called *shrinkage*
+
+2. The estimates for the smaller tanks have shrunk more
+
+3. Shrinkage is stronger when a tank’s raw proportion is far from the dashed line.
+
+Compared with the fixed effect model, the varying effect is identical differences. It's reasonable since the result of adative prior `a_bar` and `a_sigma` are similar to what we have set in the fixed effect model.
+
+
+
+# More than one clusters
+In the second part of the chapter, we are going to learn about using more than one cluster. 
+
+Let's use the chimpanzees data again (textbook: ch10_ver1, ch11_ver2; tutorial: ch10). 
+
+```{r}
+data("chimpanzees")
+d_chimpanzees = chimpanzees
+d_chimpanzees$treatment = 1 + d_chimpanzees$prosoc_left + 2*d_chimpanzees$condition
+str(d_chimpanzees)
+```
+## Fixed prior (original model)
+
+$L_i \sim Binomial(1,p_i) \\ logit(p_i) = \alpha_{actor[i]} + \beta_{treat[i]} + \gamma_{block[i]} \\ \alpha \sim Normal(0, 1.5) \\ \beta \sim Normal(0, 0.5) \\ \gamma \sim Normal(0, 0.5)$
+
+```{r, results='hide'}
+m12.2.1 = "
+data {
+	int N;
+	int pulled_left[N];
+
+	int A;
+	int actor[N];
+
+	int T;
+	int treatment[N];
+	
+	int B;
+	int blocks[N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[T];
+	real gamma[B];
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[actor[i]] + beta[treatment[i]] + gamma[blocks[i]]);
+	}
+}
+model {
+	
+	// model
+	for (i in 1:N){
+		pulled_left[i] ~ binomial(1, p[i]);
+	}
+
+	// prior
+	alpha ~ normal(0, 1.5);
+	beta ~ normal(0, .5);
+	gamma ~ normal(0, .5);
+}
+generated quantities {
+	vector[N] log_lik;
+	int pred_left[N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+		pred_left[i] = binomial_rng(1, p[i]);
+	}
+}
+"
+dat12.2.1 = list(
+  N = d_chimpanzees %>% nrow(),
+  pulled_left = d_chimpanzees$pulled_left %>% as.integer,
+  A = d_chimpanzees$actor %>% n_unique(),
+  actor = d_chimpanzees$actor %>% as.integer(),
+  T = d_chimpanzees$treatment %>% n_unique(),
+  treatment = d_chimpanzees$treatment %>% as.integer(),
+  B = d_chimpanzees$block %>% n_unique(),
+  blocks = d_chimpanzees$block %>% as.integer())
+  
+fit12.2.1 = stan(model_code = m12.2.1, data = dat12.2.1, cores = 2, chains = 2)
+```
+```{r}
+print(fit12.2.1, pars = fit12.2.1@model_pars[1:3])
+```
+
+## Adaptive prior
+We just need to replace the fixed priors of `actor`, `block` and `treatment` with adative priors then the model will become a multilevel one. You might wonder that `treatment` was *fixed* by the experiment, we should set fixed priors on it as well. However, the reason to use adative prior is because they provide better inference. Once the data has exchangeable index, then adative priors could help.
+
+Here is the mathmetical form of the model.
+
+$L_i \sim Binomial(1, p_i) \\ logit(p_i) = \alpha_{actor[i]} + \gamma_{block[i]} + \beta_{treat[i]} \\ \alpha \sim Normal(\bar\alpha, \sigma_\alpha) \\ \beta \sim Normal(0, \sigma_\beta) \\ \gamma \sim Normal(0, \sigma_\gamma)$
+
+So, the parameters of $actor_{[1]}$ to $actor_{[7]}$ will have the same prior distribution and the hyper-parameters of the distribution will be estimated from the data. The same logic goes for `block` and `treatment`. 
+
+Note that there is only one mean parameter $\bar\alpha$. We can’t identify a separate mean for each varying intercept type, because all intercepts are added together in the linear function (recall right leg and left leg example).
+
+```{r, results='hide'}
+m12.2.2 = "
+data {
+	int N;
+	int pulled_left[N];
+
+	int A;
+	int actor[N];
+
+	int T;
+	int treatment[N];
+	
+	int B;
+	int blocks[N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[T];
+	real gamma[B];
+
+	real alpha_bar;
+	real<lower=0> sigma_alpha;
+	real<lower=0> sigma_beta;
+	real<lower=0> sigma_gamma;
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[actor[i]] + beta[treatment[i]] + gamma[blocks[i]]);
+	}
+}
+model {
+	
+	// model
+	for (i in 1:N){
+		pulled_left[i] ~ binomial(1, p[i]);
+	}
+
+	// adative prior
+	alpha ~ normal(alpha_bar, sigma_alpha);
+	beta ~ normal(0, sigma_beta);
+	gamma ~ normal(0, sigma_gamma);
+
+	// hyper prior
+	alpha_bar ~ normal(0, 1.5);
+	sigma_alpha ~ exponential(1);
+	sigma_beta ~ exponential(1);
+	sigma_gamma ~ exponential(1);
+}
+generated quantities {
+	vector[N] log_lik;
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+	}
+}
+"
+dat12.2.2 = dat12.2.1
+  
+fit12.2.2 = stan(model_code = m12.2.2, data = dat12.2.2, cores = 2, chains = 2)
+```
+```{r}
+print(fit12.2.2, pars = fit12.2.2@model_pars[1:7])
+```
+## Model Comparison
+```{r}
+compare(fit12.2.1, fit12.2.2)
+```
+The results show that the model with adaptive prior is slightly better with lower WAIC. Besides, the second model has more details for us. By comparing the three sigma values, we can tell that individual difference of chimpenzees accounts for most of the variance.
+`sigma_gamma` is pretty close to 0 meaning that there is almost no variance within each block. We can conclude that whether we include block or not hardly matters in this case. 
+```{r}
+post12.2.2 = as.data.frame(fit12.2.2, pars = c("sigma_alpha", "sigma_gamma", "sigma_beta"))
+post12.2.2 %>% 
+  ggplot() +
+  geom_freqpoly(aes(sigma_alpha), color="blue") +
+  geom_freqpoly(aes(sigma_gamma), color="pink") + 
+  geom_freqpoly(aes(sigma_beta)) +
+  xlab("standard deviation") +
+  annotate("text", x = c(.5, .8, 1.7), y = c(900, 650, 300), label = c("block", "treat", "chimp"))
+```
+
+# Fix divergent transitions
+With the models in the previous section, Stan reported warnings about divergent transitions. This means the simulation has some error, compared to the ideal one. If our model has many divergent transitions, then it might resulting in a biased posterior. We will introduce two ways to deal with the problem.
+
+## Adjust target acceptance
+First we can simply increase the target acceptance rate. When it is set high, MCMC will sample with a smaller step size, which means a more accurate approximation of the curved surface.
+
+```{r, results='hide'}
+fit12.2.2b = stan(model_code = m12.2.2, data = dat12.2.2, cores = 2, chains = 2, control = list(adapt_delta=.99))
+```
+```{r}
+cat("acceptance rate 0.80: divergent =", divergent(fit12.2.2), "\n")
+cat("acceptance rate 0.99: divergent =", divergent(fit12.2.2b))
+```
+It helps. However, most of the time this is not enough.
+
+## Reparameterization
+For any statistical model, it can be written in several forms that are mathmetically identical. Some of them are easier to be sampled than others. 
+For example, the following 2 forms are identical while the second one will be easier for Stan to sample from:
+
+$\alpha \sim Normal(\mu, \sigma) \\ \alpha \sim \mu + \sigma * Normal(0, 1)$
+
+In the Bayesian statistics, this form with mean = 0 and s.d = 1 in the distribution statement is known as the **non-centered** parameterization. 
+Let's build a non-centered version of model 12.2.2. We can begin with the mathmetical form:
+
+$L_i \sim Binomial(1, p_i) \\ logit(p_i) = \bar\alpha + \alpha_{actor[i]} * \sigma_{\alpha}+ \gamma_{block[i]} * \sigma_{\gamma} + \beta_{treat[i]} * \sigma_{\beta} \\ \alpha \sim Normal(0,1) \\ \beta \sim Normal(0, 1) \\ \gamma \sim Normal(0, 1)$
+
+![](tutorialch12.png)
+
+Then we can write down the according Stan model and sample from it.
+```{r, results='hide'}
+m12.2.2c = "
+data {
+	int N;
+	int pulled_left[N];
+
+	int A;
+	int actor[N];
+
+	int T;
+	int treatment[N];
+	
+	int B;
+	int blocks[N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[T];
+	real gamma[B];
+
+	real alpha_bar;
+	real<lower=0> sigma_alpha;
+	real<lower=0> sigma_beta;
+	real<lower=0> sigma_gamma;
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha_bar + alpha[actor[i]] * sigma_alpha + beta[treatment[i]] * sigma_beta + gamma[blocks[i]] * sigma_gamma);
+	}
+}
+model {
+	
+	// model
+	for (i in 1:N){
+		pulled_left[i] ~ binomial(1, p[i]);
+	}
+
+	// adative prior
+	alpha ~ normal(0, 1);
+	beta ~ normal(0, 1);
+	gamma ~ normal(0, 1);
+
+	// hyper prior
+	alpha_bar ~ normal(0, 1.5);
+	sigma_alpha ~ exponential(1);
+	sigma_beta ~ exponential(1);
+	sigma_gamma ~ exponential(1);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+	}
+}
+"
+fit12.2.2c = stan(model_code = m12.2.2c, data = dat12.2.2, cores = 2, chains = 2)
+```
+
+```{r}
+cat("centered model with 80% acceptance: divergent =", divergent(fit12.2.2), "\n")
+cat("centered model with 99% acceptance: divergent =", divergent(fit12.2.2b), "\n")
+cat("non-centered model: divergent =", divergent(fit12.2.2c))
+```
+
+```{r}
+neff = fit12.2.2 %>% 
+  summary(., pars=fit12.2.2@model_pars[1:7]) %>% 
+  .$summary %>% 
+  .[, "n_eff"]
+
+neff_b = fit12.2.2b %>% 
+  summary(., pars=fit12.2.2@model_pars[1:7]) %>% 
+  .$summary %>% 
+  .[, "n_eff"]
+neff_c = fit12.2.2c %>% 
+  summary(., pars=fit12.2.2@model_pars[1:7]) %>% 
+  .$summary %>% 
+  .[, "n_eff"]
+
+
+neff_table = data.frame(
+  neff = neff,
+  neff_b = neff_b,
+  neff_c = neff_c
+)
+
+neff_table
+```
+
+Although these 2 methods all solve the probelm of divergent transitions. From the results, we tell that the non-centered version model has significantly more effective samples. Reparameterization also has the advantage of shorter running time when the dataset is large. 
+
+We need to keep in mind that sometimes the centered form is better.The centered form could be better for one cluster in a model while the non-centered form is better for another cluster in the same model.
+
+#Prediction in Multilevel Model
+"Prediction" in a multilevel model requires additional choices. If we wish to validate a model using the training data, that is one thing. But if we instead wish to compute predictions for new data/testing data, other than the ones observed in the sample, that is quite another.
+
+##In Sample Prediction
+I will use the chimpenzee example again. The **in sample** prediction in this case will be making the prediction(retrodiction) on any of the chimp in the training data.
+
+There are 2 ways to do this task, by either `generated quantities` in Stan or `apply` in R.
+
+###Stan method
+We will illustrate how to use the non-centered model to predict the pull_left proportion for *actor 2 in block 1*.
+```{r}
+actor = 2
+block = 1
+pred_chimp = data.frame(
+  actor = rep(actor, 4),
+  treat = 1:4,
+  block = rep(block, 4)
+)
+```
+####Model
+```{r, results='hide'}
+m12.2.3 = "
+data {
+	int N;
+	int pulled_left[N];
+
+	int A;
+	int actor[N];
+
+	int T;
+	int treatment[N];
+	
+	int B;
+	int blocks[N];
+
+	int p_N; // number of predictions
+	int p_actor[p_N];
+	int p_treatment[p_N];
+	int p_blocks[p_N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[T];
+	real gamma[B];
+
+	real alpha_bar;
+	real<lower=0> sigma_alpha;
+	real<lower=0> sigma_beta;
+	real<lower=0> sigma_gamma;
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha_bar + alpha[actor[i]] * sigma_alpha + beta[treatment[i]] * sigma_beta + gamma[blocks[i]] * sigma_gamma);
+	}
+}
+model {
+	
+	// model
+	for (i in 1:N){
+		pulled_left[i] ~ binomial(1, p[i]);
+	}
+
+	// adative prior
+	alpha ~ normal(0,1);
+	beta ~ normal(0, 1);
+	gamma ~ normal(0, 1);
+
+	// hyper prior
+	alpha_bar ~ normal(0, 1.5);
+	sigma_alpha ~ exponential(1);
+	sigma_beta ~ exponential(1);
+	sigma_gamma ~ exponential(1);
+}
+generated quantities {
+	vector[N] log_lik;
+	real pred_p[p_N];
+	int pred_left[p_N];
+	
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+	}
+
+	for (i in 1:p_N){
+		pred_p[i] = inv_logit(alpha_bar + alpha[p_actor[i]] * sigma_alpha + beta[p_treatment[i]] * sigma_beta + gamma[p_blocks[i]] * sigma_gamma);
+
+		pred_left[i] = binomial_rng(1, pred_p[i]);
+	}
+}
+"
+dat12.2.3 = list(
+  N = d_chimpanzees %>% nrow(),
+  pulled_left = d_chimpanzees$pulled_left %>% as.integer,
+  A = d_chimpanzees$actor %>% n_unique(),
+  actor = d_chimpanzees$actor %>% as.integer(),
+  T = d_chimpanzees$treatment %>% n_unique(),
+  treatment = d_chimpanzees$treatment %>% as.integer(),
+  B = d_chimpanzees$block %>% n_unique(),
+  blocks = d_chimpanzees$block %>% as.integer(),
+  p_N = pred_chimp %>% nrow(),
+  p_actor = pred_chimp$actor,
+  p_treatment = pred_chimp$treat,
+  p_blocks = pred_chimp$block)
+ 
+fit12.2.3 = stan(model_code = m12.2.3, data = dat12.2.3, chains = 2, cores = 2)
+```
+####Results
+```{r}
+stan_result = 
+  fit12.2.3 %>% 
+  as.data.frame(., pars="pred_p")
+
+p1 = 
+  data.frame(
+    mean = stan_result %>% apply(., 2,mean),
+    CI_lower = stan_result %>% apply(., 2, HPDI) %>% .[1,],
+    CI_upper = stan_result %>% apply(., 2, HPDI) %>% .[2,]
+  ) %>% 
+  ggplot() +
+  geom_line(aes(x=1:4, y=mean)) +
+  geom_ribbon(aes(x=1:4, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  ggtitle("Stan Method")
+```
+###Apply Method
+The adventage of the apply method is that we don't need to recompile a new stan model. Instead we use the posterior directly. However, this method requires the rethinking package, which is not available except on R.
+
+We need to first create a customeized function. The `with` function there allows us not to type `post$` before every parameter.
+```{r}
+post = extract.samples(fit12.2.2c, pars=fit12.2.2c@model_pars[1:7])
+str(post)
+
+p_link <- function( treatment , actor=1 , block_id=1 ) { 
+  logodds <- with( post, alpha_bar + 
+alpha[,actor]*sigma_alpha + gamma[,block_id]*sigma_gamma + beta[,treatment]*sigma_beta ) 
+  return( inv_logit(logodds) )
+}
+
+apply_result <- sapply( 1:4 , function(i) p_link( i , actor=2 , block_id=1 ) ) 
+
+p2 = 
+  data.frame(
+    mean = apply_result %>% apply(., 2,mean),
+    CI_lower = apply_result %>% apply(., 2, HPDI) %>% .[1,],
+    CI_upper = apply_result %>% apply(., 2, HPDI) %>% .[2,]
+  ) %>% 
+  ggplot() +
+  geom_line(aes(x=1:4, y=mean)) +
+  geom_ribbon(aes(x=1:4, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  ggtitle("Apply Method")
+```
+The results are the same.
+```{r}
+grid.arrange(p1, p2)
+```
+
+##Out Sample Prediction
+When we’d like to make prediction about the whole species, not just the seven chimpenzees we have, it's time for out of sample prediction. In this situation, the individual actor intercepts aren’t of interest, but the distribution of them is.
+
+The ideas of CI and PI can also be applied here. We can either predict for an "average" chimpanzee, whose intercept is exactly $\bar\alpha$, or an individual chimpanzee, whose intercept is drawn from $N(\bar\alpha, \sigma_{alpha})$. They will be denoted as **p_bar** and **p_sim** respectively.
+
+The predictions for an average chimpanzee help us to understand the impact of different treatments. 
+The predictions for an individual one illustrate how variable different chimpanzees are.
+
+###Stan Method
+Using the Stan method, we need to add some lines at the generated quantities block. 
+```{r, results='hide'}
+m12.2.4 = "
+data {
+	int N;
+	int pulled_left[N];
+
+	int A;
+	int actor[N];
+
+	int T;
+	int treatment[N];
+	
+	int B;
+	int blocks[N];
+
+}
+parameters {
+	real alpha[A];
+	real beta[T];
+	real gamma[B];
+
+	real alpha_bar;
+	real<lower=0> sigma_alpha;
+	real<lower=0> sigma_beta;
+	real<lower=0> sigma_gamma;
+}
+transformed parameters {
+	real p[N];
+	for (i in 1:N){
+		p[i] = inv_logit(alpha_bar + alpha[actor[i]] * sigma_alpha + beta[treatment[i]] * sigma_beta + gamma[blocks[i]] * sigma_gamma);
+	}
+}
+model {
+	
+	// model
+	for (i in 1:N){
+		pulled_left[i] ~ binomial(1, p[i]);
+	}
+
+	// adative prior
+	alpha ~ normal(0, 1);
+	beta ~ normal(0, 1);
+	gamma ~ normal(0, 1);
+
+	// hyper prior
+	alpha_bar ~ normal(0, 1.5);
+	sigma_alpha ~ exponential(1);
+	sigma_beta ~ exponential(1);
+	sigma_gamma ~ exponential(1);
+}
+
+generated quantities {
+	vector[N] log_lik;
+	real p_bar[T];
+  real p_sim[T];
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(pulled_left[i] | 1, p[i]);
+	}
+  
+  for (i in 1:T){
+    p_bar[i] = inv_logit(alpha_bar + beta[i] * sigma_beta);
+    p_sim[i] = inv_logit(normal_rng(alpha_bar, sigma_alpha) + beta[i] * sigma_beta);
+  }
+}
+"
+dat12.2.4 = dat12.2.2
+
+fit12.2.4 = stan(model_code = m12.2.4, data = dat12.2.4, cores = 2, chains = 2)
+```
+
+```{r}
+stan_result2 = as.data.frame(fit12.2.4, pars = c("p_bar"))
+
+p3 = 
+  data.frame(
+    mean = stan_result2 %>% apply(., 2,mean),
+    CI_lower = stan_result2 %>% apply(., 2, HPDI) %>% .[1,],
+    CI_upper = stan_result2 %>% apply(., 2, HPDI) %>% .[2,]
+  ) %>% 
+  ggplot() +
+  geom_line(aes(x=1:4, y=mean)) +
+  geom_ribbon(aes(x=1:4, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  ggtitle("p_bar: Stan Method")
+
+stan_result2 = as.data.frame(fit12.2.4, pars = c("p_sim"))
+
+p4 = 
+  data.frame(
+    mean = stan_result2 %>% apply(., 2,mean),
+    CI_lower = stan_result2 %>% apply(., 2, HPDI) %>% .[1,],
+    CI_upper = stan_result2 %>% apply(., 2, HPDI) %>% .[2,]
+  ) %>% 
+  ggplot() +
+  geom_line(aes(x=1:4, y=mean)) +
+  geom_ribbon(aes(x=1:4, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  ggtitle("p_sim: Stan Method")
+
+grid.arrange(p3,p4, nrow=1)
+```
+
+###Apply Method
+```{r}
+#post = extract.samples(fit12.2.2c, pars=fit12.2.2c@model_pars[1:7])
+pbar_link = function( treatment ) {
+  logodds <- with( post , alpha_bar + beta[,treatment] ) 
+  return( inv_logit(logodds) )
+}
+
+apply_result2 <- sapply( 1:4 , function(i) pbar_link( i ) ) 
+p5 = 
+  data.frame(
+    mean = apply_result2 %>% apply(., 2,mean),
+    CI_lower = apply_result2 %>% apply(., 2, HPDI) %>% .[1,],
+    CI_upper = apply_result2 %>% apply(., 2, HPDI) %>% .[2,]
+  ) %>% 
+  ggplot() +
+  geom_line(aes(x=1:4, y=mean)) +
+  geom_ribbon(aes(x=1:4, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  ggtitle("p_bar: Apply Method")
+
+a_sim <- with( post , rnorm( nrow(post$alpha) , alpha_bar , sigma_alpha ) )
+psim_link = function( treatment ) {
+  logodds <- with( post , a_sim + beta[,treatment] ) 
+  return( inv_logit(logodds) )
+}
+
+apply_result2 <- sapply( 1:4 , function(i) psim_link( i ) ) 
+p6 = 
+  data.frame(
+    mean = apply_result2 %>% apply(., 2,mean),
+    CI_lower = apply_result2 %>% apply(., 2, HPDI) %>% .[1,],
+    CI_upper = apply_result2 %>% apply(., 2, HPDI) %>% .[2,]
+  ) %>% 
+  ggplot() +
+  geom_line(aes(x=1:4, y=mean)) +
+  geom_ribbon(aes(x=1:4, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  ggtitle("p_sim: Apply Method")
+
+grid.arrange(p3,p4,p5,p6,nrow=2)
+```
+
+

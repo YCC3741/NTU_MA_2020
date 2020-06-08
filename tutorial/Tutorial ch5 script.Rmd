@@ -1,0 +1,521 @@
+---
+title: "Tutorial CH5"
+author: "Ryan Huang"
+date: "8/10/2019"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    toc_float: true
+---
+```{r, results='hide'}
+library(rstan)
+library(rethinking)
+library(tidyverse)
+library(gridExtra)
+```
+
+# CH5 The Many Variables
+In this chapter, we will learn about how to use multiple regression using Stan.
+
+There are two cases when we add more predictors in a regression model, continuous variables or categorical variables. In this chapter we will learn about how to treat them efficiently in stan.
+
+Also, when we have more than one predictors in our model, it's more complicated to interpreat the posterior result. We will learn about different plots to help us understand our posterior.
+
+## CH5.1 Continuous Variable
+Let's start by adding continuous variables. Following our textbook, we use the `WaffleDivorce` data.
+We are going to investigate the relationship between marriage age, marriage rate, and divorce rate.
+
+### Data: WaffleDivorce
+We first standardize our variables.
+
+*Noted that the output of scale is a matrix(dim=n,1), add [,1] to convert it to vector(dim=n)*
+```{r}
+data(WaffleDivorce)
+div = WaffleDivorce
+div = div %>% 
+  mutate(MedianAgeMarriage_z = scale(div$MedianAgeMarriage)[,1],
+         Divorce_z = scale(div$Divorce)[,1],
+         Marriage_z = scale(div$Marriage)[,1])
+```
+
+### Model
+We can start to write down our models. The first two models are just simple LR model. The last one is what we want. 
+寫模型的時候我們直接從model 3開始再把它刪成model 1, model 2就可以囉 
+* model 1: divorce rate = `alpha + beta * median age of marriage`
+* model 2: divorce rate = `alpha + beta * marriage rate`
+* model 3: divorce rate = `alpha + beta_1 * marriage rate + beta_2 * median age of marriage`
+
+#### model 5.1
+divorce rate = `alpha + beta * median age of marriage`
+```{r, results='hide'}
+m5.1 = "
+data {
+	int N;
+	vector[N] median_age_z;
+	vector[N] divorce_z;
+}
+parameters {
+	real alpha;
+	real beta_A;
+	real sigma;
+}
+model {
+	// model
+	vector[N] mu = alpha + beta_A * median_age_z;
+	divorce_z ~ normal(mu, sigma);
+
+	// prior
+	alpha ~ normal(0, 0.2);
+	beta_A ~ normal(0, 0.5);
+	sigma ~ exponential(1);
+}
+"
+dat5.1 = list(N = nrow(div), median_age_z = div$MedianAgeMarriage_z, divorce_z = div$Divorce_z)
+fit5.1 = stan(model_code = m5.1, 
+              data = dat5.1, 
+              iter = 2000, 
+              chains = 2, 
+              cores = 2)
+```
+
+#### model 5.2
+divorce rate = `alpha + beta * marriage rate`
+```{r, results='hide'}
+m5.2 = "
+data {
+	int N;
+	vector[N] marriage_z;
+	vector[N] divorce_z;
+}
+parameters {
+	real alpha;
+	real beta_M;
+	real<lower=0> sigma;
+}
+model {
+	// model
+	vector[N] mu = alpha + beta_M * marriage_z;
+	divorce_z ~ normal(mu, sigma);
+
+	// prior
+	alpha ~ normal(0, 0.2);
+	beta_M ~ normal(0, 0.5);
+	sigma ~ exponential(1);
+}
+"
+dat5.2 = list(N = nrow(div), marriage_z = div$Marriage_z, divorce_z = div$Divorce_z)
+fit5.2 = stan(model_code = m5.2, 
+              data = dat5.2, 
+              iter = 2000,
+              chains = 2, 
+              cores = 2)
+```
+
+#### model 5.3
+divorce rate = `alpha + beta_1 * marriage rate + beta_2 * median age of marriage`
+```{r}
+m5.3 = "
+data {
+	int N;
+	vector[N] median_age_z;
+	vector[N] marriage_z;
+	vector[N] divorce;
+	vector[N] counterfactual_A;
+	vector[N] counterfactual_M;
+}
+parameters {
+	real alpha;
+	real beta_A;
+	real beta_M;
+	real sigma;
+}
+model {
+	// model
+	vector[N] mu = alpha + beta_A * median_age_z + beta_M * marriage_z;
+	divorce ~ normal(mu, sigma);
+
+	// prior
+	alpha ~ normal(0, 0.2);
+	beta_M ~ normal(0, 0.5);
+	beta_A ~ normal(0, 0.5);
+	sigma ~ exponential(1);
+}
+generated quantities {
+	// counterfactual: fixed age
+	vector[N] pred_mu_1;
+	real pred_y_1[N];
+
+	// counterfactual: fixed marriage
+	vector[N] pred_mu_2;
+	real pred_y_2[N];
+
+	// backtest
+	vector[N] pred_mu_3;
+	real pred_y_3[N];
+
+	// counterfactual: fixed age
+	pred_mu_1 = alpha + beta_A * 0 + beta_M * counterfactual_M;
+	pred_y_1 = normal_rng(pred_mu_1, sigma);
+
+	// counterfactual: fixed marriage
+	pred_mu_2 = alpha + beta_A * counterfactual_A + beta_M * 0;
+	pred_y_2 = normal_rng(pred_mu_2, sigma);
+	
+	// backtest
+	pred_mu_3 = alpha + beta_A * median_age_z + beta_M * marriage_z;
+	pred_y_3 = normal_rng(pred_mu_3, sigma);
+}
+"
+dat5.3 = list(N = nrow(div), 
+              median_age_z = div$MedianAgeMarriage_z,
+              marriage_z = div$Marriage_z,
+              divorce = div$Divorce_z,
+              counterfactual_A = seq(-3, 3, length.out = 50),
+              counterfactual_M = seq(-3, 3, length.out = 50))
+fit5.3 = stan(model_code = m5.3,
+              data = dat5.3,
+              iter = 2000,
+              cores = 2,
+              chains = 2)
+```
+
+### Posterior Interpretation
+
+#### Predictor residual plots
+The logic: Use all other `X`s to *regress* on one `X`. 
+
+The `residual` of this model can be interpretated as the effect of this one `X`, while all the other `X`s are *controlled*.
+
+Then we use this `residual` to *regress* on y.
+
+We can think of this plot as displaying the linear relationship between `Y(divorce)` and `X(marriage)`, having statistically “controlled” for all the other `X(age)`.
+
+1. Regress predictor on other predictors
+2. Compute predictor residuals
+3. Regress Y on residuals
+```{r, results='hide'}
+model = "
+data {
+	int N;
+	vector[N] X;
+	vector[N] Y;
+}
+
+parameters {
+	real alpha;
+	real beta;
+	real sigma;
+}
+
+model {
+	vector[N] mu = alpha + beta * X;
+	Y ~ normal(mu, sigma);
+  alpha ~ normal(0, 0.2);
+	beta ~ normal(0, .5);
+	sigma ~ exponential(1);
+}
+
+generated quantities {
+	vector[N] res;
+	vector[N] mu;
+	mu = alpha + beta * X;
+	res = Y - mu;
+}
+"
+dat.resM = list(N = nrow(div),
+                X = div$MedianAgeMarriage_z,
+                Y = div$Marriage_z)
+
+dat.resA = list(N = nrow(div),
+                X = div$Marriage_z,
+                Y = div$MedianAgeMarriage_z)
+
+
+fit.resM = stan(model_code = model, data = dat.resM, cores = 2, chains = 2)
+fit.resA = stan(model_code = model, data = dat.resA, cores = 2, chains = 2)
+```
+
+output
+```{r}
+resM = fit.resM %>% as.data.frame() %>% select(contains("res")) %>% apply(., 2, mean)
+resA = fit.resA %>% as.data.frame() %>% select(contains("res")) %>% apply(., 2, mean)
+
+plt.resM = 
+  ggplot() +
+  geom_point(aes(resM, div$Divorce_z)) +
+  geom_smooth(aes(resM, div$Divorce_z), method = "lm") + #regression
+  labs(x="Marriage rate residuals", 
+       y="Divorce rate(std)")
+
+plt.resA = 
+  ggplot() +
+  geom_point(aes(resA, div$Divorce_z)) +
+  geom_smooth(aes(resA, div$Divorce_z), method = "lm") + #regression
+  labs(x="Age at marriage residuals", 
+       y="Divorce rate(std)")
+
+grid.arrange(plt.resM, plt.resA, nrow=1)
+```
+Problem: Complicated idea and process
+
+#### Counterfactual plots
+Counterfactual is similar to *what-if* analysis.
+
+Or more intuatively, we are wondering how X2 will impact Y if we set X1 as a constant.
+
+```{r}
+post5.3 = as.data.frame(fit5.3)
+
+# counterfactual: fixed age
+pred_mu_1 = post5.3 %>% select(contains("pred_mu_1"))
+pred_y_1 = post5.3 %>% select(contains("pred_y_1"))
+CF.A = data.frame(
+  x = seq(-3, 3, length.out = 50),
+  pred = pred_mu_1 %>% apply(., 2, mean),
+  CI_lower = pred_mu_1 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu_1 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y_1 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y_1 %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+p_CF.A = CF.A%>% 
+  ggplot() +
+  geom_line(aes(x, pred)) +
+  geom_ribbon(aes(x, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x, ymin=PI_lower, ymax=PI_upper), alpha=.3) +
+  ylim(-4,4) +
+  labs(x="Marriage rate (std)", 
+       y="Divorce rate (std)", 
+       title = "Median age marriage (std) = 0")
+
+# counterfactual: fixed marriage
+pred_mu_2 = post5.3 %>% select(contains("pred_mu_2"))
+pred_y_2 = post5.3 %>% select(contains("pred_y_2"))
+
+
+CF.M = data.frame(
+  x = seq(-3, 3, length.out = 50),
+  pred = pred_mu_2 %>% apply(., 2, mean),
+  CI_lower = pred_mu_2 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu_2 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y_2 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y_2 %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+p_CF.M = CF.M%>% 
+  ggplot() +
+  geom_line(aes(x, pred)) +
+  geom_ribbon(aes(x, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x, ymin=PI_lower, ymax=PI_upper), alpha=.3) +
+  ylim(-4,4) +
+  labs(x="Median age marriage (std)", 
+       y="Divorce rate (std)", 
+       title = "Marriage rate (std) = 0")
+
+grid.arrange(p_CF.A, p_CF.M, nrow=1)
+```
+Problem: The plot shows the "prediction" of any combination of `X`s, however, some of them are impossible in the real world.
+
+#### Posterior prediction plots
+Directly plot the predictions of real data (back test).
+Since we have more than 1 predictors, we can't easily compare the the prediction and true values using a X-Y plot.
+
+Alternatively, we will plot pred_y against true_y. The points closer to the diagonal line are better predictions.
+```{r, fig.height=4, fig.width=6}
+pred_mu_3 = post5.3 %>% select(contains("pred_mu_3")) 
+pred_y_3 = post5.3 %>% select(contains("pred_y_3")) 
+
+back.test = data.frame(
+  pred_y = pred_mu_3 %>% apply(., 2, mean),
+  true_y = div$Divorce_z,
+  CI_lower = pred_mu_3 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu_3 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y_3 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y_3 %>% apply(., 2, HPDI) %>% .[2,]
+)
+
+back.test %>% 
+  ggplot() +
+  geom_point(aes(true_y, pred_y)) +
+  geom_segment(aes(x=true_y, xend=true_y,
+               y=CI_lower, yend=CI_upper), alpha=.6, color="dodgerblue") +
+  geom_segment(aes(x=true_y, xend=true_y,
+               y=PI_lower, yend=PI_upper), alpha=.1, color="dodgerblue") +
+  geom_abline(intercept = 0, slope = 1, 
+              linetype = 'dashed', color = 'gray70') +
+  labs(x = "True divorce rate(std)", 
+       y = 'Pred average divorce rate(std)',
+       title = 'Observed versus\nestimated for each state')
+
+```
+
+
+#### Coefficient Table
+Another technique is to just compare the coefficients of differnet models
+```{r}
+plot(coeftab(fit5.1 , fit5.2 , fit5.3), pars=c("beta_A","beta_M"))
+```
+
+## CH5.2 Categorical Variable
+Instead of using `dummy coding`, we use `index coding` to avoid the uncertainty problem.
+(Under dummy coding, the reference level has fewer parameters, see rethinking ver2 p.166)
+
+### Binary Categories
+Height Example: 
+
+* Dummy coding: height = alpha + gender + beta * weight
+* index coding: height = alpha[gender] + beta * weight
+
+#### Data
+Load the `Howell1` data and convert `male` to integers.
+```{r}
+data(Howell1)
+HIGH = Howell1
+HIGH$male = HIGH$male %>% as.integer() # r index is 1 based 
+```
+
+#### Model
+There are some tricky parts in setting the model.
+1. the categorical variable must be declared as array of `int` (from 1 to number of levels).
+2. `alpha` can be set as either vector[L] or real array[L] where `L` denotes how many levels we have.
+3. use the categorical variable as the index
+4. use for loop
+```{r, results='hide'}
+m5.4 = "
+data {
+	int N;
+	int L; // number of levels
+
+	vector[N] weight;
+	int gender[N]; // must set to be int, not vector
+	vector[N] height;
+}
+
+parameters {
+	real alpha[L]; // 2 different intercept
+	real beta;
+	real sigma;
+}
+
+model {
+	// model
+	vector[N] mu;
+  
+  // for loop
+	for (i in 1:N){
+    	mu[i] = alpha[gender[i]] + beta * weight[i];
+  	}
+	height ~ normal(mu, sigma);
+
+	// prior
+	alpha ~ normal(178, 20);
+	beta ~ lognormal(0, 1);
+	sigma ~ exponential(1);
+}
+
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+
+	for (i in 1:N){
+    	pred_mu[i] = alpha[gender[i]] + beta * weight[i];
+  	}
+  	
+	pred_y = normal_rng(pred_mu, sigma);
+}
+"
+dat5.4 = list(N = nrow(HIGH), 
+              L = HIGH$male %>% unique() %>% length(),
+              weight = HIGH$weight,
+              gender = HIGH$male+1,
+              height = HIGH$height)
+fit5.4 = stan(model_code = m5.4,
+              data = dat5.4,
+              cores = 2,
+              chains = 2,
+              iter = 2000)
+```
+
+```{r}
+print(fit5.4, pars=c("alpha", "beta", "sigma"))
+```
+
+
+### Many Categories
+Milk Example: There are 4 different `clade`s, we want to compare them.
+
+* Dummy coding: kcal.per.g = clade1 + clade2 + clade3 + beta * mass
+* Index coding: kcal.per.g = alpha[clade] + beta * mass
+
+#### Data
+```{r}
+data(milk)
+glimpse(milk)
+```
+
+#### Model
+When we have many categories, the advantage of using index coding is more obvious. 
+We don't need to create extra columns for dummy variables, and the code are almost the same as the binary category model.
+```{r, results='hide'}
+m5.5 = "
+data {
+	int N;
+	int L; // number of levels
+	vector[N] mass;
+	int clade[N];
+	vector[N] kcal;
+}
+parameters {
+	real alpha[L]; // 2 different intercept
+	real<lower=0> beta;
+	real<lower=0> sigma;
+}
+model {
+	// model
+	vector[N] mu;
+	for (i in 1:N){
+    	mu[i] = alpha[clade[i]] + beta * mass[i];
+  	}
+	kcal ~ normal(mu, sigma);
+
+	// prior
+	alpha ~ normal(0, 1);
+	beta ~ lognormal(0, 1.5);
+	sigma ~ exponential(1);
+}
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+
+	for (i in 1:N){
+    	pred_mu[i] = alpha[clade[i]] + beta * mass[i];
+  	}
+
+	pred_y = normal_rng(pred_mu, sigma);
+}
+"
+dat5.5 = list(
+  N = nrow(milk),
+  L = milk$clade %>% unique() %>% length(),
+  mass = milk$mass %>% scale %>% .[,1],
+  clade = milk$clade %>% as.integer,
+  kcal = milk$kcal.per.g
+)
+fit5.5 = stan(model_code = m5.5,
+              data = dat5.5,
+              iter = 3000,
+              warmup = 2000,
+              chains = 4,
+              cores = 4)
+```
+
+result
+```{r}
+summary(fit5.5, pars=c("alpha", "beta", "sigma"), depth = 2, prob=.95)$summary
+```
+
+
+

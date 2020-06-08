@@ -1,0 +1,259 @@
+---
+title: "MA_Hw_05_03"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+suppressMessages(library(skimr)) # for n_unique func
+```
+
+## Data-processing
+### Read data
+```{r}
+data("bangladesh")
+bangladesh
+```
+
+### Select data
+I select the data which might be used first
+```{r}
+train = bangladesh %>% 
+  dplyr::select("district", "use.contraception", "urban")
+
+train$ad_district = as.integer(as.factor(train$district))
+train
+```
+
+### Group data
+I group datas by district
+```{r}
+train_gp_dis = 
+  train %>% 
+  group_by(ad_district) %>% 
+  summarise(use.contraception = sum(use.contraception)) %>% 
+  ungroup()
+train_gp_dis = 
+  train_gp_dis %>% 
+  cbind( ., (train %>% count(ad_district))[,"n"])
+
+train_gp_dis
+```
+
+## PART A
+### Model
+#### Fixed Prior Model
+For the parameters,  
+I set a to be the coefficients of different district.
+```{r}
+q3_model_fixed = "
+data {
+	int N_district;
+	int district[N_district];
+	int contrace[N_district];
+	int num_woman[N_district];
+}
+
+parameters {
+	real a[N_district];
+}
+
+transformed parameters {
+	real p[N_district];
+	
+	for (i in 1:N_district){
+		p[i] = inv_logit(a[i]);
+  }
+}
+
+model {
+	for (i in 1:N_district){
+    	contrace[i] ~ binomial(num_woman[i], p[i]);
+  	}
+	a ~ normal(0, 0.5);
+}
+
+generated quantities {
+	real log_lik[N_district];
+	real pred_y[N_district];
+	
+	for	(i in 1:N_district){
+		log_lik[i] = binomial_lpmf(contrace[i] | num_woman[i], p[i]);
+		pred_y[i] = binomial_rng(num_woman[i], p[i]);
+	}
+	
+}
+
+"
+```
+
+```{r}
+q3_data_fixed = list(
+          N_district = nrow(train_gp_dis),
+          district = train_gp_dis$ad_district,
+          contrace = train_gp_dis$use.contraception,
+          num_woman = train_gp_dis$n
+)
+```
+### Fit
+```{r}
+q3_fit_fixed = stan(
+                  model_code = q3_model_fixed, 
+                  data = q3_data_fixed, 
+                  cores = 2, chains = 2, 
+                  warmup = 2000, iter = 4000)
+
+```
+
+### Check the posteriors
+we can see that all the R hat of paras are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q3_fit_fixed, pars = c("a"))
+```
+
+## PART B
+### Model
+#### Multilevel model
+For the parameters,  
+I set a to be the coefficients of different district,  
+and set a_bar and a_sigma for the parameters which a is given by.
+```{r}
+q3_model_multi = "
+data {
+	int N_district;
+	int district[N_district];
+	int contrace[N_district];
+	int num_woman[N_district];
+}
+
+parameters {
+	real a[N_district];
+	real a_bar;
+	real<lower=0> a_sigma;
+}
+
+transformed parameters {
+	real p[N_district];
+	
+	for (i in 1:N_district){
+		p[i] = inv_logit(a[i]);
+  }
+}
+
+model {
+  // adative prior
+  a ~ normal(a_bar, a_sigma);
+  a_bar ~ normal(0, 1.5);
+  a_sigma ~ exponential(1);
+  
+  // model
+	for (i in 1:N_district){
+    	contrace[i] ~ binomial(num_woman[i], p[i]);
+  	}
+
+}
+
+generated quantities {
+	real log_lik[N_district];
+	real pred_y[N_district];
+	for	(i in 1:N_district){
+		log_lik[i] = binomial_lpmf(contrace[i] | num_woman[i], p[i]);
+		pred_y[i] = binomial_rng(num_woman[i], p[i]);
+	}
+}
+
+"
+```
+
+```{r}
+q3_data_multi = q3_data_fixed
+```
+### Fit
+```{r}
+q3_fit_multi = stan(
+                  model_code = q3_model_multi, 
+                  data = q3_data_multi, 
+                  cores = 2, chains = 2, 
+                  warmup = 1500, iter = 3000)
+
+```
+
+### Check the posteriors
+we can see that all the R hat of paras are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q3_fit_multi, pars = c("a", "a_bar", "a_sigma"))
+```
+
+## PART C
+### Tidy up data
+```{r}
+q3_post_A = as.data.frame(q3_fit_fixed, pars = "pred_y") 
+
+q3_post_A = data.frame(
+                    pred_mean_y = q3_post_A %>% apply(., 2, mean),
+                    PI_lower = q3_post_A %>% apply(., 2, HPDI) %>% .[1,],
+                    PI_upper = q3_post_A %>% apply(., 2, HPDI) %>% .[2,])
+
+q3_post_B = as.data.frame(q3_fit_multi, pars = "pred_y") 
+
+q3_post_B = data.frame(
+                    pred_mean_y = q3_post_B %>% apply(., 2, mean),
+                    PI_lower = q3_post_B %>% apply(., 2, HPDI) %>% .[1,],
+                    PI_upper = q3_post_B %>% apply(., 2, HPDI) %>% .[2,])
+                  
+q3_pred_y_A = cbind("ad_district" = c(1:60), q3_post_A)
+q3_pred_y_B = cbind("ad_district" = c(1:60), q3_post_B)
+rownames(q3_pred_y_A) = c()
+rownames(q3_pred_y_B) = c()
+q3_pred_y_A = q3_pred_y_A %>% 
+              mutate(
+                "propotion" =  pred_mean_y / q3_data_fixed$num_woman,
+                "propotion_lower" = PI_lower  / q3_data_fixed$num_woman,
+                "propotion_upper" = PI_upper / q3_data_fixed$num_woman
+
+              )
+q3_pred_y_B = q3_pred_y_B %>% 
+              mutate(
+                "propotion" =  pred_mean_y / q3_data_fixed$num_woman,
+                "propotion_lower" = PI_lower  / q3_data_fixed$num_woman,
+                "propotion_upper" = PI_upper / q3_data_fixed$num_woman
+              )
+
+q3_pred_y_A
+q3_pred_y_B
+```
+### Plot
+```{r}
+
+q3_pic_AB = q3_pred_y_A %>% 
+  ggplot() +
+  ggtitle("Fix Prior Model")+
+  geom_point(aes(ad_district, propotion, color ="pred_y_Fixed"), shape=21)+
+  geom_point(data = q3_pred_y_B, aes(ad_district, propotion, color ="pred_y_Multi"), shape=21)+
+  geom_hline(yintercept = (q3_data_fixed$contrace/q3_data_fixed$num_woman) %>% mean, alpha=0.5, linetype="dashed") +
+  geom_point(data = data.frame(q3_data_fixed), aes(c(1:60), contrace/num_woman, color ="True_y"), shape=19)
+
+q3_pic_AB
+```
+
+## PART D
+We can observe, from the above plot, that the fixed effect model and varying effect models disagree as follow:  
+The multilevel estimate is closer to the dashed line than the fixed estimate,
+which is called *shrinkage* due to the multilevel model shares the information of all of the district.  
+  
+Also, we can see that, all the point of fixed estimate is larger than the multilevel estimate, which is because:
+In the fixed effect model, I set a ~ normal(0, 0.5),  
+However, as the result of multilevel model, the a_bar(mu) is -0.54, and a_sigma(sigma) is 0.52.

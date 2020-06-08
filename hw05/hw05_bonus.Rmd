@@ -1,0 +1,174 @@
+---
+title: "MA_Hw_05_bonus"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+suppressMessages(library(skimr)) # for n_unique func
+```
+
+## Data-processing
+### Read data
+```{r}
+data("Fish")
+Fish
+```
+### Adjust data
+```{r}
+train = Fish %>%
+      mutate("fish_per_hr"=fish_caught/hours) 
+train 
+```
+
+## Model
+### Mixture Model
+For the parameters,  
+I set bca to be the coefficient of campers,  
+bch to be the coefficient of child,  
+bper to be the coefficient of person,  
+and also N alpha_lambdas for each row of data, because the rate of catching fish might differ for different people.  
+Also, the log_hour is used to adjust different time consumed for fishing.
+```{R}
+qb_model = "
+data {
+	int N;
+	int y[N];
+	int child[N];
+	int camper[N];
+	int person[N];
+	real log_hour[N];
+}
+parameters {
+  //for p of non-fishing
+  real alpha_p;
+  real bca_p;
+  real bch_p;
+  real bper_p;
+
+	//for poisson
+	real alpha_lambda[N];
+	real bch_lambda;
+	real bca_lambda;
+	real bper_lambda;
+
+}
+transformed parameters {
+	real p[N]; //prob of non-fishing
+	real lambda[N];
+  
+  for ( i in 1:N ) {
+      p[i] = inv_logit(
+                      alpha_p +
+                      bch_p*child[i] +
+                      bca_p*camper[i] +
+                      bper_p*person[i]);
+  }
+	
+  for ( i in 1:N ) {
+      lambda[i] = exp(
+                      alpha_lambda[i] +
+                      log_hour[i] +
+                      bch_lambda*child[i] +
+                      bca_lambda*camper[i] +
+                      bper_lambda*person[i]);
+  }
+}
+model {
+	// prior
+	alpha_p ~ normal(0, 1);
+	bca_p ~ normal(0, 5);
+	bch_p ~ normal(0, 5);
+	bper_p ~ normal(0, 5);
+	
+	alpha_lambda ~ normal(0, 0.1);
+  bch_lambda ~ normal(0, 0.1);
+	bca_lambda ~ normal(0, 0.1);
+	bper_lambda ~ normal(0, 0.1);
+
+	// model
+	for (i in 1:N){
+		if( y[i] == 0 ) target += log_mix(p[i], 0, poisson_lpmf(0 | lambda[i]));
+
+		if( y[i] > 0 ) target += log1m(p[i]) + poisson_lpmf(y[i] | lambda[i]);
+	}
+}
+generated quantities {
+	real log_lik[N];
+	real pred_lambda[N];
+	real pred_p[N];
+	real pred_y[N];
+		
+	for (i in 1:N){
+		if( y[i] == 0 ) log_lik[i] = log_mix(p[i], 0, poisson_lpmf(0 | lambda[i]));
+
+		if( y[i] > 0 ) log_lik[i] = log1m(p[i]) + poisson_lpmf(y[i] | lambda[i]);
+	}
+	
+	for ( i in 1:N ){
+      pred_lambda[i] = exp(
+                          alpha_lambda[i] +
+                          log_hour[i] +
+                          bch_lambda*child[i] +
+                          bca_lambda*camper[i] +
+                          bper_lambda*person[i]);
+      pred_p[i] = inv_logit(
+                          alpha_p +
+                          bch_p*child[i] +
+                          bca_p*camper[i] +
+                          bper_p*person[i]);
+      pred_y[i] = (1-pred_p[i]) * poisson_rng(pred_lambda[i]);
+	}
+	
+}
+"
+qb_data = list(
+  N = nrow(train),
+  y = train$fish_caught,
+  child = train$child,
+  camper = train$camper,
+  person = train$persons,
+  log_hour = train$hours %>% log()
+  
+)
+qb_fit= stan(
+          model_code = qb_model,
+          data = qb_data,  
+          iter = 4000, 
+          cores = 2, chains = 2)
+```
+
+### Check the posteriors
+we can see that all the R hat of paras are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(qb_fit, pars = c("alpha_p", "bca_p", "bch_p", "bper_p",
+                     "bch_lambda", "bca_lambda", "bper_lambda", "alpha_lambda"))
+```
+
+## Prediction
+### Collect answer
+```{r}
+qb_post = as.data.frame(qb_fit, pars = "pred_y") %>% exp()
+ans = cbind(train, pred_y=as.numeric(sub('.*:', '', summary(qb_post)[4,])))
+ans
+```
+### Plot
+```{r}
+
+plot(sort(Fish$fish_caught), ylim=c(0,20), pch=20)
+points(ans$pred_y[order(Fish$fish_caught)])
+```
+
+

@@ -1,0 +1,613 @@
+---
+title: "Tutorial CH6 CH7"
+author: "Ryan Huang"
+date: "8/15/2019"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 4
+    number_sections: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# CH6: Overfitting
+CH6: Overfitting, Regularization, and Information Criteria  (Textbook ver.1)
+
+CH7: Ulysses’ Compass (Textbook ver.2)
+
+The content of is chapter is highly recommeded for you to understand entropy, divergence, deviance, and information criteria.
+## Inside samples
+### Define information:
+**Information: The reduction in uncertainty derived from learning an outcome.**
+
+### Define uncertainty: Information entropy
+**The uncertainty contained in a probability distribution is the average log-probability of an event.**
+
+### Entropy to accuracy: Divergence
+**Divergence: The additional uncertainty induced by using probabilities from one distribution to describe another distribution.**
+
+Math: The average difference in log probability between the target (p) and model (q).
+
+So if we have a pair of candidate distributions, then the candidate that minimizes the divergence will be closest to the target.
+
+As an approximating function q becomes more accurate, divergence will shrink. So if we have a pair of candidate distributions, then the candidate that minimizes the divergence will be closest to the target.
+
+### Model Comparison: Deviance & log-prob score
+`lppd` (log-pointwise-predictive-density): 加總所有observation 在所有sample的平均log-prob score, higher the better
+deviance = -2 * lppd, lower the better
+
+## Out of sample: Predicting predictive accuracy
+1. Cross validation
+  + LOOCV: leave-one-out cross-validation, use n = sample size - 1 as training data and the only one left as testing data
+  + LOOIS: Pareto-smoothed importance sampling leave-one-out cross-validation, more efficient way of LOOCV
+2. Information criteria
+  + AIC: ` -2lppd + 2p`, lower(lower deviance or fewer parameters) the better. *highly constrained*
+  + WAIC: `lppd + penalty term`, penalty term is defined as “sum of the variance in log-prob for each observation i.” *widely applicable* *pointwise*
+
+
+```{r, results='hide'}
+library(rethinking)
+library(rstan)
+library(tidyverse)
+library(gridExtra)
+```
+
+# CH7: Interaction
+CH7: Interactions (Textbook ver.1)
+
+CH8: Conditional Manatees (Textbook ver.2)
+
+## Categorical variable * continuous variable
+### Data: rugged(GDP)
+* Rescaling:
+  + gpd: log & mean scaling (average is 1)
+  + rugged: max scaling (because 0 is important, % of max value)
+```{r}
+data("rugged")
+
+# extract countries with GDP data
+rugged = rugged %>% 
+  filter(complete.cases(rgdppc_2000))
+
+# rescale variables
+rugged = rugged %>% 
+  mutate(
+    log_gdp = log(rgdppc_2000)) %>% 
+  mutate(
+    log_gdp_std = log_gdp / mean(log_gdp),
+    rugged_std = rugged / max(rugged))
+```
+### Model
+
+#### Prior
+Prior diagnosis:
+1. `a` close to the avg. log GDP (`1` because we rescale)
+2. most extreme case of `|b|`: max(log_GDP) - min(log_GDP)
+```{r}
+# search of reasonable priors
+n = 100
+a1 = rnorm(n, 1, 1)
+a2 = rnorm(n, 1, .1)
+
+b1 = rnorm(n, 0, 1)
+b2 = rnorm(n, 0, .3)
+
+p1 = ggplot() + 
+  xlim(0, 1) + 
+  ylim(0.5, 1.5) +
+  geom_hline(yintercept = max(rugged$log_gdp_std)) +
+  geom_hline(yintercept = min(rugged$log_gdp_std)) +
+  geom_abline(intercept = max(rugged$log_gdp_std), 
+              slope = (min(rugged$log_gdp_std) - max(rugged$log_gdp_std)), 
+              color="blue") + 
+  geom_abline(intercept = min(rugged$log_gdp_std), 
+              slope = (max(rugged$log_gdp_std) - min(rugged$log_gdp_std)), 
+              color="blue") +
+  labs(x="ruggedness", y="log GDP(std)", title="flat prior")
+p2 = ggplot() + 
+  xlim(0, 1) + 
+  ylim(0.5, 1.5) +
+  geom_hline(yintercept = max(rugged$log_gdp_std)) +
+  geom_hline(yintercept = min(rugged$log_gdp_std)) +
+  geom_abline(intercept = max(rugged$log_gdp_std), 
+              slope = (min(rugged$log_gdp_std) - max(rugged$log_gdp_std)), 
+              color="blue") + 
+  geom_abline(intercept = min(rugged$log_gdp_std), 
+              slope = (max(rugged$log_gdp_std) - min(rugged$log_gdp_std)), 
+              color="blue") +
+  labs(x="ruggedness", y="log GDP(std)", title="regularized prior")
+
+for (i in 1:n) {
+  p1 = p1 + geom_abline(intercept = a1[i], slope = b1[i], alpha=.2)
+  p2 = p2 + geom_abline(intercept = a2[i], slope = b2[i], alpha=.2)
+}
+
+grid.arrange(p1, p2, nrow=1)
+```
+#### Model 7.1: basic
+`GDP ~ a + b * ruggedness`
+```{r, results='hide'}
+m7.1 = "
+data {
+	int N;
+	vector[N] loggdp;
+	vector[N] rugged;
+}
+parameters {
+	real a;
+	real b;
+	real sigma;
+}
+model {
+	vector[N] mu = a + b * rugged;
+	loggdp ~ normal(mu, sigma);
+
+	a ~ normal(1, 0.1);
+	b ~ normal(0, 0.3);
+	sigma ~ exponential(1);
+}
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+	vector[N] log_lik; // for model comparison
+	
+  pred_mu = a + b * rugged;
+	pred_y = normal_rng(pred_mu, sigma);
+
+  for (i in 1:N){
+    log_lik[i] = normal_lpdf(loggdp[i] | pred_mu[i], sigma);
+  }
+	
+}
+"
+dat7.1 = list(N = nrow(rugged),
+              loggdp = rugged$log_gdp_std,
+              rugged = rugged$rugged_std - mean(rugged$rugged_std))
+
+fit7.1 = stan(model_code = m7.1,
+              data = dat7.1,
+              cores = 2,
+              chains = 2,
+              iter = 2000)
+```
+```{r}
+print(fit7.1, pars=c("a", "b","sigma"), prob=c(.025, .975))
+```
+
+#### Model 7.2: different intercept
+model_2: GDP ~ a[i] + b * ruggedness, i = 1(africa) or i = 0(non-africa)
+```{r, results='hide'}
+m7.2 = "
+data {
+	int N;
+	int L;
+	vector[N] loggdp;
+	vector[N] rugged;
+	int africa[N];
+}
+parameters {
+	real a[L];
+	real b;
+	real sigma;
+}
+model {
+	vector[N] mu;
+	for (i in 1:N){
+		mu[i] = a[africa[i]] + b * rugged[i];
+	}
+
+	loggdp ~ normal(mu, sigma);
+
+	for (i in 1:L){
+		a[i] ~ normal(1, 0.1);
+	}
+	
+	b ~ normal(0, 0.3);
+	sigma ~ exponential(1);
+}
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+	vector[N] log_lik;
+	
+	for (i in 1:N){
+		pred_mu[i] = a[africa[i]] + b * rugged[i];
+		log_lik[i] = normal_lpdf(loggdp[i] | pred_mu[i], sigma);
+	}
+
+	pred_y = normal_rng(pred_mu, sigma);
+	
+}
+"
+dat7.2 = list(N = nrow(rugged),
+              L = rugged$cont_africa %>% unique() %>% length(),
+              rugged = rugged$rugged_std - mean(rugged$rugged_std),
+              loggdp = rugged$log_gdp_std,
+              africa = rugged$cont_africa+1
+)
+fit7.2 = stan(model_code = m7.2,
+              data = dat7.2,
+              cores = 2,
+              chains = 2,
+              iter = 2000)
+```
+```{r}
+print(fit7.2, pars=c("a", "b","sigma"), prob=c(.025, .975))
+```
+
+#### Model 7.3: different intercept + different slope
+model_3: GDP ~ a[i] + b[i] * ruggedness, i = 1(africa) or i = 0(non-africa)
+```{r, results='hide'}
+m7.3 = "
+data {
+	int N;
+	int L;
+	vector[N] loggdp;
+	vector[N] rugged;
+	int africa[N];
+}
+parameters {
+	real a[L];
+	real b[L];
+	real sigma;
+}
+model {
+	vector[N] mu;
+	for (i in 1:N){
+		mu[i] = a[africa[i]] + b[africa[i]] * rugged[i];
+	}
+
+	loggdp ~ normal(mu, sigma);
+
+	for (i in 1:L){
+		a[i] ~ normal(1, 0.1);
+		b[i] ~ normal(0, 0.3);
+	}
+	
+	sigma ~ exponential(1);
+}
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+	vector[N] log_lik;
+	
+	for (i in 1:N){
+		pred_mu[i] = a[africa[i]] + b[africa[i]] * rugged[i];
+		log_lik[i] = normal_lpdf(loggdp[i] | pred_mu[i], sigma);
+	}
+
+	pred_y = normal_rng(pred_mu, sigma);
+	
+}
+"
+dat7.3 = list(N = nrow(rugged),
+              L = rugged$cont_africa %>% unique() %>% length(),
+              rugged = rugged$rugged_std - mean(rugged$rugged_std),
+              loggdp = rugged$log_gdp_std,
+              africa = rugged$cont_africa+1
+)
+fit7.3 = stan(model_code = m7.3,
+              data = dat7.3,
+              cores = 2,
+              chains = 2,
+              iter = 2000)
+```
+
+```{r}
+print(fit7.3, pars=c("a", "b","sigma"), prob=c(.025, .975))
+```
+
+
+### Posterior Prediction
+#### Model 7.1
+```{r}
+post7.1 = fit7.1 %>% as.data.frame()
+pred_mu7.1 = post7.1 %>% select(contains("pred_mu"))
+pred_y7.1 = post7.1 %>% select(contains("pred_y"))
+
+result7.1 = data.frame(
+  pred_mu = pred_mu7.1 %>% apply(., 2, mean),
+  CI_lower = pred_mu7.1 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu7.1 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y7.1 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y7.1 %>% apply(., 2, HPDI) %>% .[2,],
+  gdp = rugged$log_gdp_std,
+  rug = rugged$rugged_std,
+  africa = rugged$cont_africa
+)
+
+result7.1 %>% 
+  ggplot() +
+  geom_point(aes(rug, gdp)) +
+  geom_line(aes(rug, pred_mu)) +
+  geom_ribbon(aes(x=rug, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x=rug, ymin=PI_lower, ymax=PI_upper), alpha=.2) +
+  ggtitle("Model 7.1")
+```
+#### Model 7.2
+```{r}
+post7.2 = fit7.2 %>% as.data.frame()
+pred_mu7.2 = post7.2 %>% select(contains("pred_mu"))
+pred_y7.2 = post7.2 %>% select(contains("pred_y"))
+
+result7.2 = data.frame(
+  pred_mu = pred_mu7.2 %>% apply(., 2, mean),
+  CI_lower = pred_mu7.2 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu7.2 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y7.2 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y7.2 %>% apply(., 2, HPDI) %>% .[2,],
+  gdp = rugged$log_gdp_std,
+  rug = rugged$rugged_std,
+  africa = rugged$cont_africa
+)
+
+p7.2 = result7.2 %>% 
+  ggplot(aes(fill = ifelse(africa==1, "africa", "else"))) +
+  geom_point(aes(rug, gdp), shape=21, stroke=0) + # stroke defines the thickness of the border of the point
+  geom_line(aes(rug, pred_mu)) +
+  geom_ribbon(aes(x=rug, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  labs(fill="Continent", title = "Model 7.2")
+
+p7.2
+p7.2 + 
+  facet_wrap(~africa) +
+  geom_ribbon(aes(x=rug, ymin=PI_lower, ymax=PI_upper), alpha=.2)
+```
+#### Model 7.3
+```{r}
+post7.3 = fit7.3 %>% as.data.frame()
+pred_mu7.3 = post7.3 %>% select(contains("pred_mu"))
+pred_y7.3 = post7.3 %>% select(contains("pred_y"))
+
+result7.3 = data.frame(
+  pred_mu = pred_mu7.3 %>% apply(., 2, mean),
+  CI_lower = pred_mu7.3 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu7.3 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y7.3 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y7.3 %>% apply(., 2, HPDI) %>% .[2,],
+  gdp = rugged$log_gdp_std,
+  rug = rugged$rugged_std,
+  africa = rugged$cont_africa
+)
+
+p7.3 = result7.3 %>% 
+  ggplot(aes(rug, gdp, fill = ifelse(africa==1, "africa", "else"))) +
+  geom_point(shape=21, stroke=0) + # stroke defines the thickness of the border of the point
+  geom_line(aes(rug, pred_mu)) +
+  geom_ribbon(aes(x=rug, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  labs(fill="Continent")
+
+p7.3
+p7.3 + facet_wrap(~africa)
+```
+
+### Model Comparison
+```{r}
+rethinking::compare(fit7.1, fit7.2, fit7.3)
+```
+
+## Continuous variable * continuous variable
+### Data: tulips(blooms)
+* Rescaling data is to help us to gain some ideas of prior.
+  + tulip: max scaling(0 is important)
+  + water / shade: centered ()
+```{r}
+data(tulips)
+tulips$blooms_std <- tulips$blooms / max(tulips$blooms) 
+tulips$water_cent <- tulips$water - mean(tulips$water)
+tulips$shade_cent <- tulips$shade - mean(tulips$shade)
+```
+### Model
+Prior diagnosis:
+1. a > 0 and a < 1
+2. maxium change in `water` and `shade` is 2, maxium change in `blooms_std` is 1. |b| < 0.5
+
+#### Model 7.4: basic
+`bloosm ~ a + b1 * water + b2 * shade`
+```{r, results='hide'}
+m7.4 = "
+data {
+	int N;
+	vector[N] blooms;
+	vector[N] water;
+	vector[N] shadow;
+}
+parameters {
+	real a;
+	real bw;
+	real bs;
+	real sigma;
+}
+model {
+	vector[N] mu;
+	mu = a + bw * water + bs * shadow;
+	blooms ~ normal(mu, sigma);
+
+	a ~ normal( 0.5 , 0.25 );
+    bw ~ normal( 0 , 0.25 );
+    bs ~ normal( 0 , 0.25 );
+    sigma ~ exponential( 1 );
+}
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+	vector[N] log_lik;
+	
+	pred_mu = a + bw * water + bs * shadow;
+	
+	for (i in 1:N){
+		log_lik[i] = normal_lpdf(blooms[i] | pred_mu[i], sigma);
+	}
+
+	pred_y = normal_rng(pred_mu, sigma);
+}
+"
+dat7.4 = list(N = nrow(tulips),
+              blooms = tulips$blooms_std,
+              water = tulips$water_cent,
+              shadow = tulips$shade_cent
+)
+fit7.4 = stan(model_code = m7.4,
+              data = dat7.4,
+              cores = 2,
+              chains = 2,
+              iter = 2000)
+```
+
+```{r}
+print(fit7.4, pars=c("a", "bw", "bs","sigma"), prob=c(.025, .975))
+```
+
+
+#### Model 7.5: interaction
+`bloosm ~ a + b1 * water + b2 * shade + b3 * water * shade`
+
+Prior of b3: assume the strongest interaction is high enough to make other var. have zero effect.
+So b3 should be the same magnitude as the main effect.
+```{r}
+m7.5 = "
+data {
+	int N;
+	vector[N] blooms;
+	vector[N] water;
+	vector[N] shadow;
+}
+parameters {
+	real a;
+	real bw;
+	real bs;
+	real bws;
+	real sigma;
+}
+model {
+	vector[N] mu;
+	mu = a + bw * water + bs * shadow + bws * water .* shadow;
+  blooms ~ normal(mu, sigma);
+
+  a ~ normal( 0.5 , 0.25 );
+  bw ~ normal( 0 , 0.25 );
+  bs ~ normal( 0 , 0.25 );
+  bws ~ normal( 0 , 0.25 );
+  sigma ~ exponential( 1 );
+}
+generated quantities {
+	vector[N] pred_mu;
+	real pred_y[N];
+	vector[N] log_lik;
+	
+	pred_mu = a + bw * water + bs * shadow + bws * water .* shadow;
+	
+	for (i in 1:N){
+		log_lik[i] = normal_lpdf(blooms[i] | pred_mu[i], sigma);
+	}
+
+	pred_y = normal_rng(pred_mu, sigma);
+}
+"
+dat7.5 = list(N = nrow(tulips),
+              blooms = tulips$blooms_std,
+              water = tulips$water_cent,
+              shadow = tulips$shade_cent
+)
+fit7.5 = stan(model_code = m7.5,
+              data = dat7.5,
+              cores = 2,
+              chains = 2,
+              iter = 2000)
+```
+```{r}
+print(fit7.5, pars=c("a", "bw", "bs","bws","sigma"), prob=c(.025, .975))
+```
+
+### Posterior Prediction
+#### Model 7.4
+```{r}
+pred_mu7.4 = fit7.4 %>% as.data.frame() %>% select(contains("pred_mu"))
+pred_y7.4 = fit7.4 %>% as.data.frame() %>% select(contains("pred_y"))
+
+result7.4 = data.frame(
+  pred_mu = pred_mu7.4 %>% apply(., 2, mean),
+  CI_lower = pred_mu7.4 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu7.4 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y7.4 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y7.4 %>% apply(., 2, HPDI) %>% .[2,],
+  water = tulips$water_cent,
+  shadow = tulips$shade_cent,
+  blooms = tulips$blooms_std,
+  water_level = paste("water level = ",tulips$water_cent),
+  shadow_level = paste("shadow level = ",tulips$shade_cent)
+)
+
+result7.4 %>% 
+  ggplot() +
+  geom_point(aes(water,blooms)) +
+  geom_line(aes(water, pred_mu)) +
+  geom_ribbon(aes(x=water, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x=water, ymin=PI_lower, ymax=PI_upper), alpha=.2) +
+  facet_grid(~shadow_level)
+
+result7.4 %>% 
+  ggplot() +
+  geom_point(aes(shadow,blooms)) +
+  geom_line(aes(shadow, pred_mu)) +
+  geom_ribbon(aes(x=shadow, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x=shadow, ymin=PI_lower, ymax=PI_upper), alpha=.2) +
+  facet_wrap(~water_level)
+```
+#### Model 7.5
+```{r}
+pred_mu7.5 = fit7.5 %>% as.data.frame() %>% select(contains("pred_mu"))
+pred_y7.5 = fit7.5 %>% as.data.frame() %>% select(contains("pred_y"))
+
+result7.5 = data.frame(
+  pred_mu = pred_mu7.5 %>% apply(., 2, mean),
+  CI_lower = pred_mu7.5 %>% apply(., 2, HPDI) %>% .[1,],
+  CI_upper = pred_mu7.5 %>% apply(., 2, HPDI) %>% .[2,],
+  PI_lower = pred_y7.5 %>% apply(., 2, HPDI) %>% .[1,],
+  PI_upper = pred_y7.5 %>% apply(., 2, HPDI) %>% .[2,],
+  water = tulips$water_cent,
+  shadow = tulips$shade_cent,
+  blooms = tulips$blooms_std,
+  water_level = paste("water level = ",tulips$water_cent),
+  shadow_level = paste("shadow level = ",tulips$shade_cent)
+)
+
+result7.5 %>% 
+  ggplot() +
+  geom_point(aes(water,blooms)) +
+  geom_line(aes(water, pred_mu)) +
+  geom_ribbon(aes(x=water, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x=water, ymin=PI_lower, ymax=PI_upper), alpha=.2) +
+  facet_grid(~shadow_level)
+
+result7.5 %>% 
+  ggplot() +
+  geom_point(aes(shadow,blooms)) +
+  geom_line(aes(shadow, pred_mu)) +
+  geom_ribbon(aes(x=shadow, ymin=CI_lower, ymax=CI_upper), alpha=.6) +
+  geom_ribbon(aes(x=shadow, ymin=PI_lower, ymax=PI_upper), alpha=.2) +
+  facet_wrap(~water_level)
+```
+
+### Model Comparison
+```{r}
+library(loo)
+fit7.4 %>% extract_log_lik() %>% waic()
+fit7.5 %>% extract_log_lik() %>% waic()
+rethinking::compare(fit7.4, fit7.5)
+```
+
+### Explaination
+Tulips need both water and light to produce blooms. At low light levels, water can’t have much of an effect, because the tulips don’t have enough light to produce blooms. At higher light levels, water can matter more, because the tulips have enough light to produce blooms. At very high light levels, light is no longer limiting the blooms, and so water can have a much more dramatic impact on the outcome.
+
+
+
+
+
+
+
+

@@ -37,6 +37,7 @@ The data we use here is from an experiment. People are asked how much permissibl
 ```{r}
 data("Trolley")
 d_Trolley = Trolley
+d_Trolley
 ```
 
 Let's look at the overall distribution and cumulative distribution of the response.
@@ -135,6 +136,7 @@ I = 0:1
 scenario = expand.grid(A=0:1,C=0:1,I=0:1) %>% 
   filter(!(A == 1 & C==1)) %>% 
   mutate(case = rep(c(1,2,3), 2))
+scenario
 ```
 
 ```{r, results='hide'}

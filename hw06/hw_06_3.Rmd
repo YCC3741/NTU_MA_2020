@@ -1,0 +1,313 @@
+---
+title: "MA_Hw_06_03"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+suppressMessages(library(gridExtra))
+suppressMessages(library(skimr)) # for n_unique func
+```
+
+## Data-processing
+### Read data
+```{r}
+data(bangladesh)
+bangladesh
+```
+
+### Select data
+I select the data which might be used first
+```{r}
+train = bangladesh %>% 
+  dplyr::select("district", "urban", "use.contraception")
+
+train$district = as.integer(as.factor(train$district))
+train
+```
+
+
+## PART A
+### Centered Model
+Centered varying model
+```{r}
+q3_model_A = "
+data{
+  int N;
+	int N_district;
+	
+	int district[N];
+	int urban[N];
+	
+	int contracept[N]; // y
+}
+parameters {
+	// parameters
+	vector[2] alpha[N_district]; // N_district x 2 matrix
+
+	// hyperparameters
+	vector<lower=0>[2] sigma_alpha;
+	corr_matrix[2] rho_alpha;
+
+}
+transformed parameters {
+	vector[N] p;
+	matrix[2,2] SIGMA_alpha; //sigma matrix in MVN
+
+	for (i in 1:N){
+		p[i] = inv_logit( alpha[district[i], 1] + alpha[district[i], 2] * urban[i] );
+	}
+
+	SIGMA_alpha = quad_form_diag(rho_alpha, sigma_alpha);
+
+}
+model{
+	//likelihood
+	contracept ~ binomial(1, p);
+
+	//prior
+	alpha ~ multi_normal(rep_vector(0, 2), SIGMA_alpha);
+
+	//hyper prior
+	sigma_alpha ~ exponential(1);
+	rho_alpha ~ lkj_corr(2);
+
+}
+generated quantities {
+	vector[N] log_lik;
+	vector[N] pred_y;
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(contracept[i] | 1, p[i]); 
+	}
+	for (i in 1:N){
+		pred_y[i] = binomial_rng(1, p[i]); 
+	}
+}
+"
+```
+
+
+#### Data and Initialise
+```{r}
+q3_data_A = list(
+  N = nrow(train),
+	N_district = length(unique(train$district)),
+	
+	district = train$district,
+	urban = train$urban,
+	contracept = train$use.contraception
+)
+```
+#### Fit
+```{r}
+q3_fit_A = stan(
+                model_code = q3_model_A, 
+                data = q3_data_A, 
+                cores = 4, chains = 2, 
+                warmup = 4000, iter = 16000,
+                control = list(adapt_delta=.99)
+                )
+
+```
+
+### Check the posteriors
+we can see that all the R hat of paras are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q3_fit_A, pars = c("alpha"))
+```
+
+## PART B
+### Un-Centered Model
+To decompose the Cov, I use the L_Rho and Z_alpha to replace the original R and diag_matrix(sigma_par)
+```{r}
+q3_model_B = "
+data{
+  int N;
+	int N_district;
+	
+	int district[N];
+	int urban[N];
+	
+	int contracept[N]; // y
+}
+parameters {
+	//hyperparameters
+	cholesky_factor_corr[2] L_Rho_alpha;
+	vector<lower=0>[2] sigma_alpha;
+
+	//parameters
+	matrix[2, N_district] z_alpha;
+}
+
+transformed parameters{
+	vector[N] p;
+	matrix[N_district, 2] alpha;
+
+	// calculate alpha
+	alpha = (diag_pre_multiply(sigma_alpha, L_Rho_alpha) * z_alpha)'; 
+	// we transpose the result to make it a N_district x 2 matrix
+	
+
+	// calculate p **you have to put this part after the parts calculating alpha/beta**
+	for (i in 1:N){
+		p[i] = inv_logit(alpha[district[i], 1] + alpha[district[i], 2] * urban[i]);
+	}
+	
+}
+model{
+	//likelihood
+	contracept ~ binomial(1, p);
+
+	//hyperprior
+	L_Rho_alpha ~ lkj_corr_cholesky(2);
+	sigma_alpha ~ exponential(1);
+
+	//prior
+	to_vector(z_alpha) ~ normal(0, 1);
+
+}
+generated quantities{
+	vector[N] log_lik;
+	vector[N] pred_y;
+	for (i in 1:N){
+		log_lik[i] = binomial_lpmf(contracept[i] | 1, p[i]); 
+	}
+	for (i in 1:N){
+		pred_y[i] = binomial_rng(1, p[i]); 
+	}
+}
+"
+```
+
+#### Data and Initialise
+```{r}
+q3_data_B = list(
+  N = nrow(train),
+	N_district = length(unique(train$district)),
+	
+	district = train$district,
+	urban = train$urban,
+	contracept = train$use.contraception
+)
+```
+#### Fit
+```{r}
+q3_fit_B = stan(
+    model_code = q3_model_B, 
+    data = q3_data_B, 
+    cores = 4, chains = 2, 
+    warmup = 4000, iter = 16000,
+    control = list(adapt_delta=.99, max_treedepth = 25)
+    )
+
+```
+
+### Check the posteriors
+we can see that all the R hat of paras are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q3_fit_B, pars = c("alpha"))
+```
+
+## PART C
+Plot the mean varying effect estimates for both the intercepts and slopes, by district, from one of the above model.  
+I choose model_B to plot.
+
+### Unpooled result
+The unpooled result are directly from the data. We just compute the mean of the contracept for each woman in the rural(α) and the urban respectively and substract rural contracept from urban contracpet to get the difference(β).
+```{r}
+unpooled = train %>% 
+  group_by(district, urban) %>% 
+  summarise(use.contraception = mean(use.contraception)) %>% 
+  ungroup() %>% 
+  mutate(urban = ifelse(urban  == 1, "urban", "rural")) %>% 
+  spread(urban, use.contraception) %>% 
+  mutate(difference = urban - rural)
+
+unpooled
+```
+
+```{r}
+q3_pic_alpha_beta = ggplot()+
+  geom_point(data = unpooled, aes(x = rural, y = difference, color = "Train data"))
+
+q3_pic_rural_urban = ggplot()+
+  geom_point(data = unpooled, aes(x = rural, y = urban, color = "Train data"))
+```
+
+### Partially pooled
+For partially pooled data, we extract samples from the stan model then filtered out the alpha and beta column.  
+Plotting the scatter plot is the same as the unpooled part. Then, we can visualize the shrinkage effect.
+```{r}
+q3_post_B = as.data.frame(q3_fit_B, pars = "alpha")
+q3_result_B = data.frame(
+    interceptmean = q3_post_B %>% apply(., 2, mean)
+)
+
+partialpooled = data.frame(
+    district = 1:60,
+    rural = q3_result_B$interceptmean[1:60],
+    difference = q3_result_B$interceptmean[61:120]) %>% 
+    mutate(urban = rural + difference)
+
+partialpooled
+```
+
+```{r}
+q3_pic_alpha_beta = q3_pic_alpha_beta + 
+  geom_point(data = partialpooled, 
+             aes(rural, difference, color = "Prediction")) +
+  geom_segment(data = partialpooled, 
+               aes(x = rural,
+                   y = difference,
+                   xend = unpooled$rural, 
+                   yend = unpooled$difference)) +
+  labs(x = "alpha", y = "beta")
+
+q3_pic_rural_urban = q3_pic_rural_urban + 
+  geom_point(data = partialpooled, 
+             aes(rural, urban, color = "Prediction")) +
+  geom_segment(data = NULL, 
+               aes(x = partialpooled$rural, 
+                   y = partialpooled$urban,
+                   xend = unpooled$rural, 
+                   yend = unpooled$urban)) +
+  labs(x = "rural", y = "urban")
+```
+
+```{r}
+for (i in c(c(0.1,0.3,0.5,0.8,0.99))) {
+  q3_pic_alpha_beta = q3_pic_alpha_beta + 
+    stat_ellipse(data = partialpooled, 
+                 aes(x = rural, y = difference),
+                 type = "norm", level = i, alpha=.2)
+  
+  q3_pic_rural_urban = q3_pic_rural_urban + 
+    stat_ellipse(data = partialpooled, 
+                 aes(x = rural, y = urban),
+                 type = "norm", level = i, alpha=.2)
+}
+```
+
+### Contour
+Notice that we have some NA training data which is due to lacking some kinds of data in train dataset, such as (district 10, urban), and those will make some red points don't link to blue points.  
+  
+Each red point(partially pooled result) is pulled from the blue(unpooled result) towards the center of the contours, as a result of shrinkage in both dimensions. Black points farther from the center experience more shrinkage, because they are less plausible.  
+Also, we can see that the district with <span style="color: red;">larger intercept</span> would have <span style="color: red;">smaller slope</span>.
+```{r}
+q3_pic_alpha_beta
+q3_pic_rural_urban
+```
+

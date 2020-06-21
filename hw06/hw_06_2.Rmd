@@ -1,0 +1,239 @@
+---
+title: "MA_Hw_06_02"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+suppressMessages(library(skimr)) # for n_unique func
+```
+
+## Data-processing
+### Read data
+```{r}
+data(Oxboys)
+Oxboys
+```
+
+### Select data
+I select the data which might be used first
+```{r}
+train = Oxboys %>%
+  dplyr::select("Subject", "age", "height")
+train
+```
+
+## PART A
+### Centered Model
+Centered varying model
+```{r}
+q2_model_A = "
+data{
+	int N;
+	int N_boys;
+	
+	int boy_id[N];
+	real age[N];
+	real height[N];
+}
+parameters{
+	
+	//parameters
+	real alpha[N_boys];
+	real beta[N_boys];
+	real<lower=0> sigma_height;
+
+	//hyperparameters
+	real hyper_alpha;
+	real hyper_beta;
+	vector<lower=0>[2] sigma_par; // [sigma_alpha, sigma_beta]
+	corr_matrix[2] R;
+
+}
+transformed parameters{
+
+	//variable declarations
+	vector[2] y[N_boys];	  // y vector, N_boys x 2 matrix
+  vector[2] Mu;					  // Mu vector in MVN
+	matrix[2, 2] Cov;			// Cov matrix in MVN
+	vector[N] mu_height;			// mu_height
+
+  // y vector
+	for (j in 1:N_boys) {
+		y[j, 1] = alpha[j];
+		y[j, 2] = beta[j];
+
+	  // Mu vector in MVN
+	  Mu[1] = hyper_alpha;
+	  Mu[2] = hyper_beta;
+	
+	  // Cov matrix in MVN
+	  Cov = quad_form_diag(R, sigma_par); 
+	  // i.e. diag_matrix(sigma_par)  * R * diag_matrix(sigma_par)
+	
+	}
+
+	// mu_height
+	for (i in 1:N){
+		mu_height[i] = alpha[boy_id[i]] + beta[boy_id[i]] * age[i];
+	}
+
+}
+model{
+	
+	//model
+	height ~ normal(mu_height, sigma_height);
+
+	//prior
+	sigma_height ~ exponential(1);
+	y ~ multi_normal(Mu, Cov);
+
+	//hyper prior
+	sigma_par ~ exponential(1);
+	hyper_alpha ~ normal(0, 2);
+	hyper_beta ~ normal(0, 0.5);
+	R ~ lkj_corr(2);
+	
+}
+generated quantities {
+	vector[N] log_lik;
+	for (i in 1:N){
+		log_lik[i] = normal_lpdf(height[i] | mu_height[i], sigma_height);
+	}
+}
+"
+```
+
+
+#### Data and Initialise
+```{r}
+q2_data_A = list(
+  N = nrow(train),
+	N_boys = length(unique(train$Subject)),
+	
+	boy_id = train$Subject,
+	age = train$age,
+  height = train$height
+)
+```
+#### Fit
+```{r}
+q2_fit_A = stan(
+                model_code = q2_model_A, 
+                data = q2_data_A, 
+                cores = 4, chains = 2, 
+                warmup = 2000, iter = 8000,
+                control = list(adapt_delta=.99)
+                )
+
+```
+
+## PART B
+### Un-Centered Model
+To decompose the Cov, I use the L_Rho and Z_alpha to replace the original R and diag_matrix(sigma_par)
+```{r}
+q2_model_B = "
+data {
+	int N;
+	int N_boys;
+	
+	int boy_id[N];
+	real age[N];
+	real height[N];
+}
+
+parameters {
+	//hyperparameters
+	cholesky_factor_corr[2] L_Rho_alpha;
+	vector<lower=0>[2] sigma_alpha;
+
+	//parameters
+	matrix[2, N_boys] z_alpha;
+	real<lower=0> sigma_height;
+}
+
+transformed parameters{
+  vector[N] mu_height;
+	matrix[N_boys, 2] alpha;
+
+	// calculate alpha
+	alpha = (diag_pre_multiply(sigma_alpha, L_Rho_alpha) * z_alpha)'; 
+	// we transpose the result to make it a N_boys x 2 matrix
+
+	// calculate height **you have to put this part after the parts calculating alpha/beta**
+	for (i in 1:N){
+		mu_height[i] = alpha[boy_id[i], 1] + alpha[boy_id[i], 2] * age[i];
+	}
+	
+}
+model{
+  //model
+	height ~ normal(mu_height, sigma_height);
+
+	//prior
+	sigma_height ~ exponential(1);
+	to_vector(z_alpha) ~ normal(0, 1);
+
+	//hyperprior
+	L_Rho_alpha ~ lkj_corr_cholesky(2);
+	sigma_alpha ~ exponential(1);
+
+}
+generated quantities{
+	vector[N] log_lik;
+	
+	for (i in 1:N){
+		log_lik[i] = normal_lpdf(height[i] | mu_height[i], sigma_height);
+	}
+}
+"
+```
+
+#### Data and Initialise
+```{r}
+q2_data_B = list(
+  N = nrow(train),
+	N_boys = length(unique(train$Subject)),
+	
+	boy_id = train$Subject,
+	age = train$age,
+  height = train$height
+)
+```
+#### Fit
+```{r}
+q2_fit_B = stan(
+    model_code = q2_model_B, 
+    data = q2_data_B, 
+    cores = 4, chains = 2, 
+    warmup = 2000, iter = 16000,
+    control = list(adapt_delta=.99, max_treedepth = 25)
+    )
+
+```
+
+## PART C
+### Check the posteriors
+we can see that all the R hat of paras of both models are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q2_fit_A, pars = c( "sigma_par"))
+print(q2_fit_B, pars = c( "sigma_alpha"))
+```
+
+### Variation to the heights
+By seeing the sigmas of two models,  
+we can see that the <span style="color: blue;">`first one`</span> in sigma is <span style="color: blue;">`larger`</span> than the second one in both models.  
+The first one in both models represent the <span style="color: blue;">`intercept`</span>,  
+and hence, we could know <span style="color: blue;">`intercept`</span> contributes more variation to the heights.

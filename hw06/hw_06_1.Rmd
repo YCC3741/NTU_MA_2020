@@ -1,0 +1,293 @@
+---
+title: "MA_Hw_06_01"
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+## Packages
+```{r}
+suppressMessages(library(plyr))
+suppressMessages(library(rethinking))
+suppressMessages(library(rstan))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggplot2))
+suppressMessages(library(Metrics))
+suppressMessages(library(skimr)) # for n_unique func
+```
+
+## Data-processing
+### Read data
+```{r}
+data("Trolley")
+Trolley
+```
+
+### Select data
+I select the data which might be used first
+```{r}
+train = Trolley %>% 
+  dplyr::select("id", "action", "intention", "contact", "response")
+
+train
+```
+
+### Group data
+I group datas by id, and replace each clusters of IDs with numbers.
+```{r}
+train_gp_id = 
+  train %>%
+  mutate(cluster_id = as.integer(factor(.$id))) %>% 
+  dplyr::select("cluster_id", "action", "intention", "contact", "response")
+
+train_gp_id
+```
+
+## PART A
+### Model
+#### Varying Effect Model
+For the parameters,  
+bA is the coefficient of Action,  
+bC is the coefficient of contact,  
+bI is the coefficient of intention,  
+and a, a_bar, a_sigma for varying effect part.
+And the difference between two models are that one doesn't considers the femininity of name, yet another does.
+```{r}
+q1_model_varying = "
+data{
+	int N;
+	int N_cluster; // kinds of clusters
+	
+	int R[N]; // response
+	int A[N]; // action
+	int C[N]; // contact
+	int I[N]; // intention
+	int id[N]; // cluster id
+}
+
+parameters{
+  real a[N_cluster];
+  real a_bar;
+	real<lower=0> a_sigma;
+
+	real bA;
+	real bC;
+	real bI;
+
+	ordered[6] cutpoints;
+}
+
+transformed parameters{
+	real phi[N];
+	
+	for (i in 1:N){
+		phi[i] =  a[id[i]] + bA * A[i] + bC * C[i] + bI * I[i];
+  }
+}
+
+model{
+	// hyper prior
+  a_bar ~ normal(0, 1.5);
+  a_sigma ~ exponential(1);
+  a ~ normal(a_bar, a_sigma);
+  // adative prior
+
+  bA ~ normal(0,0.5);
+  bC ~ normal(0,0.5);
+  bI ~ normal(0,0.5);
+  	
+  cutpoints ~ normal(0,1.5);
+  
+  for (i in 1:N){
+    R[i] ~ ordered_logistic(phi[i], cutpoints);
+  }
+}
+
+generated quantities{
+	real log_lik[N];
+	real pred_phi[N];
+  int pred_R[N];
+
+	for (i in 1:N){
+		log_lik[i] = ordered_logistic_lpmf(R[i] | phi[i], cutpoints);
+	}
+
+
+  for (i in 1:N){
+    pred_phi[i] =  a[id[i]] + bA * A[i] + bC * C[i] + bI * I[i];
+    pred_R[i] = ordered_logistic_rng(pred_phi[i], cutpoints);
+  }
+}
+"
+```
+
+#### Model without ID
+For the parameters,  
+bA is the coefficient of Action,  
+bC is the coefficient of contact,  
+bI is the coefficient of intention.
+And the difference between two models are that one doesn't considers the ID, which ignores individuals.
+```{r}
+q1_model_withoutID = "
+data{
+	int N;
+	
+	int R[N]; // response
+	int A[N]; // action
+	int C[N]; // contact
+	int I[N]; // intention
+}
+
+parameters{
+	real bA;
+	real bC;
+	real bI;
+
+	ordered[6] cutpoints;
+}
+
+transformed parameters{
+	real phi[N];
+	
+	for (i in 1:N){
+		phi[i] = bA * A[i] + bC * C[i] + bI * I[i];
+  }
+}
+
+model{
+  bA ~ normal(0,0.5);
+  bC ~ normal(0,0.5);
+  bI ~ normal(0,0.5);
+  	
+  cutpoints ~ normal(0,1.5);
+  
+  for (i in 1:N){
+    R[i] ~ ordered_logistic(phi[i], cutpoints);
+  }
+}
+
+generated quantities{
+	real log_lik[N];
+	real pred_phi[N];
+  int pred_R[N];
+
+	for (i in 1:N){
+		log_lik[i] = ordered_logistic_lpmf(R[i] | phi[i], cutpoints);
+	}
+
+  for (i in 1:N){
+    pred_phi[i] = bA * A[i] + bC * C[i] + bI * I[i];
+    pred_R[i] = ordered_logistic_rng(pred_phi[i], cutpoints);
+  }
+}
+"
+```
+#### Data and Initialise
+```{r}
+q1_data_varying = list(
+    N = nrow(train_gp_id),
+    N_cluster = length(unique(train_gp_id$cluster_id)),
+    
+    R = train_gp_id$response %>% as.integer(),
+    A = train_gp_id$action %>% as.integer(),
+    C = train_gp_id$contact %>% as.integer(),
+    I = train_gp_id$intention %>% as.integer(),
+    id = train_gp_id$cluster_id %>% as.integer()
+)
+
+q1_init_varying <- function() {
+  list(cutpoints = c(-1.9, -1.2, -0.7, 0.2, 0.9, 1.8)) 
+}
+
+q1_data_withoutID = list(
+    N = nrow(train_gp_id),
+    
+    R = train_gp_id$response %>% as.integer(),
+    A = train_gp_id$action %>% as.integer(),
+    C = train_gp_id$contact %>% as.integer(),
+    I = train_gp_id$intention %>% as.integer()
+)
+
+q1_init_withoutID <- function() {
+  list(cutpoints = c(-1.9, -1.2, -0.7, 0.2, 0.9, 1.8))
+}
+
+```
+#### Fit
+```{r}
+q1_fit_varying = stan(
+                  model_code = q1_model_varying, 
+                  data = q1_data_varying, 
+                  init = q1_init_varying,
+                  cores = 4, chains = 2, 
+                  warmup = 2000, iter = 8000,
+                  control = list(adapt_delta=0.9)
+                  )
+q1_fit_withoutID = stan(
+                  model_code = q1_model_withoutID, 
+                  data = q1_data_withoutID, 
+                  init = q1_init_withoutID,
+                  cores = 4, chains = 2,
+                  warmup = 1500, iter = 4000,
+                  control = list(adapt_delta=0.9)
+                  )
+```
+
+## PART B
+### Check the posteriors
+we can see that all the R hat of paras of both models are 1, which means they are convergent
+```{r}
+options(max.print=1000000)
+print(q1_fit_varying$, pars = c( "a", "a_bar", "a_sigma", "bA", "bC", "bI", "cutpoints"))
+print(q1_fit_withoutID, pars = c( "bA", "bC", "bI", "cutpoints"))
+```
+
+### Compare Two model
+#### WAIC
+we can see that the varying effect model is fitting better.
+```{r}
+compare(q1_fit_varying, q1_fit_withoutID)
+```
+
+#### Posterior Prediciton
+```{r}
+q1_post_A = as.data.frame(q1_fit_varying, pars = "pred_R")
+q1_post_B = as.data.frame(q1_fit_withoutID, pars = "pred_R")
+
+q1_result_A = data.frame(
+    pred_y = q1_post_A %>% apply(., 2, mean)
+)
+q1_result_B = data.frame(
+    pred_y = q1_post_B %>% apply(., 2, mean)
+)
+```
+
+As calculating correlation and rmse, we can see clearly that  
+we have higher correlation with true response and also lower rmse in the varying model,  
+which mean that it perform better to predict.
+```{r}
+q1_pred_varying = q1_result_A$pred_y
+q1_pred_withoutID = q1_result_B$pred_y
+train_response = train_gp_id$response
+
+train_varying_corr = cor(q1_pred_varying, train_response)
+train_withoutID_corr = cor(q1_pred_withoutID, train_response)
+
+print(paste0("The correlation of true response and varying_model response is: ", train_varying_corr))
+print(paste0("The correlation of true response and withoutID_model response is: ", train_withoutID_corr))
+
+train_varying_rmse = rmse(train_response, q1_pred_varying)
+train_withoutID_rmse = rmse(train_response, q1_pred_withoutID)
+
+print(paste0("The rmse of true response and varying_model response is: ", train_varying_rmse))
+print(paste0("The rmse of true response and withoutID_model response is: ", train_withoutID_rmse))
+```
+
+### Summary
+Impact of individual variation
+By WAIC, corr and rmse, we can see that the varying effect model fits and works better.  
+It may be because that withoutID_model not considering cluster_id, which implies it regards that all of individuals are in the same group and don't consider the individual differences, so it doesn't consider the impact of different groups of clsuters, and therefore performs worse at the end.
